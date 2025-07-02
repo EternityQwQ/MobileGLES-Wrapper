@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-android:
-    runs-on: ubuntu-22.04  # 使用更稳定的基础镜像
+    runs-on: ubuntu-22.04
     env:
       BUILD_DIR: "android-build"
       ANDROID_ABI: "arm64-v8a"
@@ -15,8 +15,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # 获取完整历史记录
 
     - name: Setup Java
       uses: actions/setup-java@v3
@@ -24,23 +22,27 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
+    # 修复：使用正确的Android SDK设置方式
     - name: Setup Android SDK
       uses: android-actions/setup-android@v2
-      with:
-        accept-licenses: true
+      # 移除了无效的accept-licenses参数
+
+    # 显式接受Android许可证
+    - name: Accept Android Licenses
+      run: |
+        yes | $ANDROID_HOME/tools/bin/sdkmanager --licenses
 
     - name: Install Android NDK
       run: |
-        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ env.NDK_VERSION }}"
+        $ANDROID_HOME/tools/bin/sdkmanager "ndk;${{ env.NDK_VERSION }}"
         echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
-        echo "PATH=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}:$PATH" >> $GITHUB_ENV
+        echo "NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
 
     - name: Verify NDK installation
       run: |
         echo "ANDROID_HOME: $ANDROID_HOME"
         echo "ANDROID_NDK_HOME: $ANDROID_NDK_HOME"
-        $ANDROID_NDK_HOME/ndk-build --version
-        ls -la $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/
+        ls -la $ANDROID_NDK_HOME
 
     - name: Install CMake
       run: |
