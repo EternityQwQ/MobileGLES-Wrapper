@@ -1,66 +1,120 @@
 name: Build
 
 on:
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build-android:
-    runs-on: ubuntu-22.04
-    container:
-      image: mingc/android-build-box:latest
-      options: --user root -e NDK_VERSION=25.2.9519653
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
+    # 1. 检出代码
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-    - name: Prepare environment
+    # 2. 设置基础环境
+    - name: Setup environment
       run: |
-        # 设置环境变量
-        echo "BUILD_DIR=/workspace/android-build" >> $GITHUB_ENV
+        # 设置关键环境变量
+        echo "BUILD_DIR=$GITHUB_WORKSPACE/android-build" >> $GITHUB_ENV
         echo "ANDROID_ABI=arm64-v8a" >> $GITHUB_ENV
-        echo "ANDROID_PLATFORM=android-24" >> $GITHUB_ENV
+        echo "ANDROID_PLATFORM=24" >> $GITHUB_ENV
         
-        # 确保使用正确的NDK版本
-        export ANDROID_NDK_HOME=/opt/android-ndk
+        # 创建构建目录
+        mkdir -p $BUILD_DIR
+        echo "✅ Environment setup complete"
 
-    - name: Create build directory
+    # 3. 安装必要工具
+    - name: Install essential tools
       run: |
-        mkdir -p ${{ env.BUILD_DIR }}
-        echo "Build directory created at ${{ env.BUILD_DIR }}"
+        sudo apt-get update -y
+        sudo apt-get install -y --no-install-recommends \
+          build-essential \
+          cmake \
+          ninja-build \
+          clang \
+          git \
+          wget \
+          unzip
+        
+        echo "✅ Essential tools installed"
 
-    - name: Configure CMake
+    # 4. 下载并设置NDK
+    - name: Install Android NDK
+      run: |
+        # 下载NDK
+        NDK_VERSION="25.2.9519653"
+        NDK_ZIP="android-ndk-r25b-linux.zip"
+        wget -q "https://dl.google.com/android/repository/$NDK_ZIP"
+        unzip -q "$NDK_ZIP"
+        rm "$NDK_ZIP"
+        
+        # 设置环境变量
+        NDK_HOME="$GITHUB_WORKSPACE/android-ndk-r25b"
+        echo "NDK_HOME=$NDK_HOME" >> $GITHUB_ENV
+        echo "ANDROID_NDK_HOME=$NDK_HOME" >> $GITHUB_ENV
+        echo "PATH=$NDK_HOME:$PATH" >> $GITHUB_ENV
+        
+        # 验证安装
+        echo "NDK version:"
+        $NDK_HOME/ndk-build --version
+        echo "✅ NDK installed and configured"
+
+    # 5. 配置项目
+    - name: Configure project
       working-directory: ${{ env.BUILD_DIR }}
       run: |
-        cmake /workspace \
-          -DCMAKE_SYSTEM_NAME=Android \
-          -DCMAKE_SYSTEM_VERSION=${{ env.ANDROID_PLATFORM }} \
-          -DCMAKE_ANDROID_ARCH_ABI=${{ env.ANDROID_ABI }} \
-          -DCMAKE_ANDROID_NDK=$ANDROID_NDK_HOME \
-          -DCMAKE_ANDROID_STL_TYPE=c++_shared \
+        cmake $GITHUB_WORKSPACE \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=$ANDROID_ABI \
+          -DANDROID_PLATFORM=$ANDROID_PLATFORM \
           -DCMAKE_BUILD_TYPE=Release \
           -G Ninja
+          
+        echo "✅ Project configured"
 
+    # 6. 构建项目
     - name: Build project
       working-directory: ${{ env.BUILD_DIR }}
       run: |
         cmake --build . --target mobileglues --parallel $(nproc)
-        echo "Build completed!"
-
-    - name: Verify build output
-      run: |
-        if [ -f "${{ env.BUILD_DIR }}/libmobileglues.so" ]; then
-          echo "✅ Build successful! File size: $(ls -lh ${{ env.BUILD_DIR }}/libmobileglues.so | awk '{print $5}')"
+        
+        # 验证构建产物
+        if [ -f "libmobileglues.so" ]; then
+          echo "✅ Build successful! File size: $(stat -c %s libmobileglues.so) bytes"
         else
           echo "❌ Build failed - libmobileglues.so not found!"
-          find ${{ env.BUILD_DIR }} -name "*.so" -exec echo "Found: {}" \;
+          ls -l
           exit 1
         fi
 
+    # 7. 验证架构
+    - name: Verify architecture
+      run: |
+        # 检查是否为 ARM64 架构
+        arch_info=$(readelf -h $BUILD_DIR/libmobileglues.so | grep 'Machine:' | awk '{print $2}')
+        
+        if [ "$arch_info" = "AArch64" ]; then
+          echo "✅ Verified: ARM64 (AArch64) architecture"
+        else
+          echo "❌ ERROR: Incorrect architecture - expected ARM64, found $arch_info"
+          exit 1
+        fi
+
+    # 8. 上传成品
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: android-arm64-libmobileglues
         path: ${{ env.BUILD_DIR }}/libmobileglues.so
-        retention-days: 7
+        retention-days: 30
         if-no-files-found: error
+
+    # 9. 清理资源
+    - name: Cleanup
+      run: |
+        echo "Build artifacts preserved"
+        echo "Temporary files will be discarded after job completion"
