@@ -6,87 +6,54 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-22.04
-    env:
-      BUILD_DIR: "android-build"
-      ANDROID_ABI: "arm64-v8a"
-      ANDROID_PLATFORM: "android-24"
-      NDK_VERSION: "25.2.9519653"  # 使用广泛兼容的NDK版本
+    container:
+      image: mingc/android-build-box:latest
+      options: --user root -e NDK_VERSION=25.2.9519653
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # 关键修复：使用Java 11而不是Java 17
-    - name: Setup Java 11 (for Android compatibility)
-      uses: actions/setup-java@v3
-      with:
-        java-version: '11'  # Android工具需要Java 8-11
-        distribution: 'temurin'
-
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v2
-
-    # 修复许可证接受问题
-    - name: Accept Android Licenses
+    - name: Prepare environment
       run: |
-        # 安装兼容性包
-        sudo apt-get update
-        sudo apt-get install -y libxml2-utils
+        # 设置环境变量
+        echo "BUILD_DIR=/workspace/android-build" >> $GITHUB_ENV
+        echo "ANDROID_ABI=arm64-v8a" >> $GITHUB_ENV
+        echo "ANDROID_PLATFORM=android-24" >> $GITHUB_ENV
         
-        # 确保sdkmanager可用
-        mkdir -p $ANDROID_HOME/licenses
-        echo "8933bad161af4178b1185d1a37fbf41ea5269c55" > $ANDROID_HOME/licenses/android-sdk-license
-        echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> $ANDROID_HOME/licenses/android-sdk-license
-        echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" >> $ANDROID_HOME/licenses/android-sdk-license
-        
-        # 安装基本工具
-        $ANDROID_HOME/tools/bin/sdkmanager "platform-tools"
-
-    - name: Install Android NDK
-      run: |
-        $ANDROID_HOME/tools/bin/sdkmanager "ndk;${{ env.NDK_VERSION }}"
-        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
-        echo "NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
-
-    - name: Verify NDK installation
-      run: |
-        echo "ANDROID_HOME: $ANDROID_HOME"
-        echo "ANDROID_NDK_HOME: $ANDROID_NDK_HOME"
-        ls -la $ANDROID_NDK_HOME
-
-    - name: Install CMake and Ninja
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake ninja-build
+        # 确保使用正确的NDK版本
+        export ANDROID_NDK_HOME=/opt/android-ndk
 
     - name: Create build directory
-      run: mkdir -p ${{ env.BUILD_DIR }}
+      run: |
+        mkdir -p ${{ env.BUILD_DIR }}
+        echo "Build directory created at ${{ env.BUILD_DIR }}"
 
-    - name: Configure with CMake
+    - name: Configure CMake
       working-directory: ${{ env.BUILD_DIR }}
       run: |
-        cmake $GITHUB_WORKSPACE \
+        cmake /workspace \
           -DCMAKE_SYSTEM_NAME=Android \
           -DCMAKE_SYSTEM_VERSION=${{ env.ANDROID_PLATFORM }} \
           -DCMAKE_ANDROID_ARCH_ABI=${{ env.ANDROID_ABI }} \
           -DCMAKE_ANDROID_NDK=$ANDROID_NDK_HOME \
           -DCMAKE_ANDROID_STL_TYPE=c++_shared \
           -DCMAKE_BUILD_TYPE=Release \
-          -DANDROID_ABI=${{ env.ANDROID_ABI }} \
-          -DANDROID_PLATFORM=${{ env.ANDROID_PLATFORM }} \
           -G Ninja
 
-    - name: Build the project
+    - name: Build project
       working-directory: ${{ env.BUILD_DIR }}
-      run: cmake --build . --target mobileglues --parallel $(nproc)
+      run: |
+        cmake --build . --target mobileglues --parallel $(nproc)
+        echo "Build completed!"
 
     - name: Verify build output
       run: |
-        find ${{ env.BUILD_DIR }} -name "*.so" -exec ls -lh {} \;
         if [ -f "${{ env.BUILD_DIR }}/libmobileglues.so" ]; then
-          echo "✅ Build successful!"
+          echo "✅ Build successful! File size: $(ls -lh ${{ env.BUILD_DIR }}/libmobileglues.so | awk '{print $5}')"
         else
           echo "❌ Build failed - libmobileglues.so not found!"
+          find ${{ env.BUILD_DIR }} -name "*.so" -exec echo "Found: {}" \;
           exit 1
         fi
 
