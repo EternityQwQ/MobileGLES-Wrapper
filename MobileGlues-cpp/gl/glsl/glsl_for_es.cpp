@@ -569,9 +569,75 @@ void process_sampler_buffer(std::string& source) { // a simplized version, shoul
         pos += 11;
     }
 
-    std::regex pattern(R"(texelFetch\s*\(\s*(\w+)\s*,\s*([^)]+?)\s*\))");
-    source = std::regex_replace(source, pattern,
-                                "texelFetch($1, ivec2(($2) % u_BufferTexWidth, ($2) / u_BufferTexWidth), 0)");
+    // Manually parse texelFetch calls to handle nested parentheses properly.
+    // Directly converts texelFetch(sampler, index) to texelFetch(sampler, bufferCoords(index), 0)
+    {
+        std::string result;
+        result.reserve(source.size() * 2);
+        size_t scan_pos = 0;
+        const size_t src_len = source.size();
+
+        while (scan_pos < src_len) {
+            size_t tf_pos = source.find("texelFetch(", scan_pos);
+            if (tf_pos == std::string::npos) {
+                result.append(source, scan_pos, src_len - scan_pos);
+                break;
+            }
+
+            result.append(source, scan_pos, tf_pos - scan_pos);
+
+            size_t paren_start = tf_pos + 11;
+            size_t arg_start = paren_start;
+
+            while (arg_start < src_len && std::isspace(source[arg_start]))
+                arg_start++;
+
+            size_t arg1_start = arg_start;
+            while (arg_start < src_len && (std::isalnum(source[arg_start]) || source[arg_start] == '_'))
+                arg_start++;
+            std::string sampler_name = source.substr(arg1_start, arg_start - arg1_start);
+
+            while (arg_start < src_len && std::isspace(source[arg_start]))
+                arg_start++;
+
+            if (arg_start >= src_len || source[arg_start] != ',') {
+                result.append("texelFetch(");
+                scan_pos = paren_start;
+                continue;
+            }
+            arg_start++;
+
+            while (arg_start < src_len && std::isspace(source[arg_start]))
+                arg_start++;
+
+            size_t arg2_start = arg_start;
+            int paren_depth = 0;
+            size_t arg2_end = arg_start;
+            while (arg2_end < src_len) {
+                char c = source[arg2_end];
+                if (c == '(') {
+                    paren_depth++;
+                } else if (c == ')') {
+                    if (paren_depth == 0) break;
+                    paren_depth--;
+                } else if (c == ',' && paren_depth == 0) {
+                    break;
+                }
+                arg2_end++;
+            }
+
+            std::string index_expr = source.substr(arg2_start, arg2_end - arg2_start);
+            while (!index_expr.empty() && std::isspace(index_expr.back()))
+                index_expr.pop_back();
+
+            while (arg2_end < src_len && source[arg2_end] != ')')
+                arg2_end++;
+
+            result.append("texelFetch(" + sampler_name + ", bufferCoords(" + index_expr + "), 0)");
+            scan_pos = arg2_end + 1;
+        }
+        source = result;
+    }
 
     const char* boundaryProtection = R"(
 ivec2 bufferCoords(int index) {
@@ -585,9 +651,6 @@ ivec2 bufferCoords(int index) {
     return ivec2(x, y);
 }
 )";
-
-    source = std::regex_replace(source, std::regex("texelFetch\\((\\w+)\\s*,\\s*ivec2\\(([^)]+)\\)\\s*,\\s*0\\)"),
-                                "texelFetch($1, bufferCoords($2), 0)");
 
     size_t insertion_point = find_insertion_point(source);
     if (insertion_point != std::string::npos) {
@@ -783,7 +846,7 @@ std::vector<unsigned int> glsl_to_spirv(GLenum shader_type, int glsl_version, co
     shader.setStrings(shader_src, 1);
 
     using namespace glslang;
-    shader.setEnvInput(EShSourceGlsl, shader_language, EShClientVulkan, glsl_version);
+    shader.setEnvInput(EShSourceGlsl, shader_language, EShClientOpenGL, glsl_version);
     shader.setEnvClient(EShClientOpenGL, EShTargetOpenGL_450);
     shader.setEnvTarget(EShTargetSpv, EShTargetSpv_1_5);
     shader.setAutoMapLocations(true);
