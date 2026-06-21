@@ -5,132 +5,131 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
-#include <cctype>
 #include "shader.h"
-
-#include <GL/gl.h>
-#include "log.h"
-#include "program.h"
-#include "../gles/loader.h"
 #include "../includes.h"
 #include "glsl/glsl_for_es.h"
-#include "../config/settings.h"
-#include "FSR1/FSR1.h"
+#include "log.h"
+#include "../gles/loader.h"
+#include "mg.h"
+#include "GL/gl.h"
+#include <regex>
+#include <cstring>
+#include <string>
 
-#define DEBUG 0
-
-struct shader_t shaderInfo;
-
-UnorderedMap<GLuint, bool> shader_map_is_sampler_buffer_emulated;
-UnorderedMap<GLuint, bool> shader_map_is_atomic_counter_emulated;
-
-bool can_run_essl3(unsigned int esversion, const char* glsl) {
-    if (strncmp(glsl, "#version 100", 12) == 0) {
-        return true;
-    }
-    if (strncmp(glsl, "#version 300 es", 15) == 0) {
-        return true;
-    }
-    if (strncmp(glsl, "#version 310 es", 15) == 0) {
-        return true;
-    }
-    if (strncmp(glsl, "#version 320 es", 15) == 0) {
-        return true;
-    }
-    return false;
+// ---------------------------------------------------------------------------
+// Determine if shader is already ES-compatible (direct passthrough)
+// ---------------------------------------------------------------------------
+static bool is_direct_shader(const char* glsl_code) {
+    std::string code = glsl_code;
+    int version = getGLSLVersion(glsl_code);
+    if (version == -1) return false;
+    // Only pass through shaders that are already ESSL
+    return (version == 100 || version == 300 || version == 310 || version == 320);
 }
 
-bool is_direct_shader(const char* glsl) {
-    bool es3_ability = can_run_essl3(hardware->es_version, glsl);
-    return es3_ability;
+// ---------------------------------------------------------------------------
+// Determine if shader is a geometry shader based on content analysis
+// ---------------------------------------------------------------------------
+static bool is_geometry_shader(const char* glsl_code) {
+    std::string code = glsl_code;
+    // Check for geometry shader layout qualifiers
+    return (code.find("layout(triangles)") != std::string::npos ||
+            code.find("layout(triangle_strip)") != std::string::npos ||
+            code.find("layout(points)") != std::string::npos ||
+            code.find("layout(lines)") != std::string::npos ||
+            code.find("layout(line_strip)") != std::string::npos ||
+            code.find("layout(quads)") != std::string::npos ||
+            code.find("layout(isolines)") != std::string::npos ||
+            code.find("max_vertices") != std::string::npos ||
+            code.find("EmitVertex()") != std::string::npos ||
+            code.find("EndPrimitive()") != std::string::npos);
 }
 
-bool check_if_sampler_buffer_used(std::string str) {
-    return str.find("samplerBuffer") != std::string::npos;
+// ---------------------------------------------------------------------------
+// Determine if shader is a tessellation shader based on content analysis
+// ---------------------------------------------------------------------------
+static bool is_tessellation_shader(const char* glsl_code) {
+    std::string code = glsl_code;
+    return (code.find("layout(vertices") != std::string::npos ||
+            code.find("gl_TessLevel") != std::string::npos ||
+            code.find("gl_TessCoord") != std::string::npos ||
+            code.find("patch") != std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// Determine if shader is a compute shader based on content analysis
+// ---------------------------------------------------------------------------
+static bool is_compute_shader(const char* glsl_code) {
+    std::string code = glsl_code;
+    return (code.find("layout(local_size_x") != std::string::npos ||
+            code.find("gl_WorkGroupSize") != std::string::npos ||
+            code.find("gl_WorkGroupID") != std::string::npos ||
+            code.find("gl_LocalInvocationID") != std::string::npos ||
+            code.find("gl_GlobalInvocationID") != std::string::npos ||
+            code.find("gl_NumWorkGroups") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Detect the actual shader type from GLSL source content
+// ---------------------------------------------------------------------------
+static GLenum detect_shader_type_from_source(const char* glsl_code) {
+    if (is_geometry_shader(glsl_code)) return GL_GEOMETRY_SHADER;
+    if (is_tessellation_shader(glsl_code)) return GL_TESS_EVALUATION_SHADER;
+    if (is_compute_shader(glsl_code)) return GL_COMPUTE_SHADER;
+    return GL_FRAGMENT_SHADER; // default
+}
+
+// ---------------------------------------------------------------------------
+// glShaderSource hook
+// ---------------------------------------------------------------------------
 void glShaderSource(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) {
     LOG()
-    shaderInfo.id = 0;
-    shaderInfo.converted = "";
-    shaderInfo.frag_data_changed = 0;
-    size_t l = 0;
-    for (int i = 0; i < count; i++)
-        l += (length && length[i] >= 0) ? length[i] : strlen(string[i]);
-    std::string glsl_src, essl_src;
-    glsl_src.reserve(l + 1);
-    if (length) {
-        for (int i = 0; i < count; i++) {
-            if (length[i] >= 0)
-                glsl_src += std::string_view(string[i], length[i]);
-            else
-                glsl_src += string[i];
-        }
-    } else {
-        for (int i = 0; i < count; i++) {
-            glsl_src += string[i];
+    LOG_D("glShaderSource hook, shader=%d, count=%d", shader, count)
+
+    // Get the shader type (set during glCreateShader)
+    GLenum shaderType = GL_FRAGMENT_SHADER;
+    GLES.glGetShaderiv(shader, GL_SHADER_TYPE, (GLint*)&shaderType);
+
+    if (count <= 0 || !string || !string[0]) {
+        GLES.glShaderSource(shader, count, string, length);
+        return;
+    }
+
+    std::string glsl_code = string[0];
+
+    // If the shader type is unknown (e.g. Iris sets it after source), detect from content
+    if (shaderType == 0 || shaderType == GL_FRAGMENT_SHADER) {
+        GLenum detected = detect_shader_type_from_source(glsl_code.c_str());
+        if (detected != GL_FRAGMENT_SHADER) {
+            shaderType = detected;
+            LOG_D("Detected shader type from source: %d", shaderType)
         }
     }
 
-    bool is_sampler_buffer_emulated = hardware->emulate_texture_buffer && check_if_sampler_buffer_used(glsl_src);
+    LOG_D("glShaderSource: shaderType=%d", shaderType)
 
-    if (is_direct_shader(glsl_src.c_str())) {
-        LOG_D("[INFO] [Shader] Direct shader source: ")
-        LOG_D("%s", glsl_src.c_str())
-        essl_src = glsl_src;
-    } else {
-        int glsl_version = getGLSLVersion(glsl_src.c_str());
-        LOG_D("[INFO] [Shader] Shader source: ")
-        LOG_D("%s", glsl_src.c_str())
-        GLint shaderType;
-        GLES.glGetShaderiv(shader, GL_SHADER_TYPE, &shaderType);
-        int return_code = 0;
-        essl_src = GLSLtoGLSLES(glsl_src.c_str(), shaderType, hardware->es_version, glsl_version, return_code);
-        if (return_code == 1) { // atomicCounterEmulated
-            shader_map_is_atomic_counter_emulated[shader] = true;
-            LOG_D("[INFO] [Shader] Atomic counter emulated in shader %d", shader)
-        }
-
-        if (essl_src.empty()) {
-            LOG_E("Failed to convert shader %d.", shader)
-            return;
-        }
-        LOG_D("\n[INFO] [Shader] Converted Shader source: \n%s", essl_src.c_str())
-    }
-    if (!essl_src.empty()) {
-        shaderInfo.id = shader;
-        shaderInfo.converted = essl_src;
-        const char* s[] = {essl_src.c_str()};
-        GLES.glShaderSource(shader, count, s, nullptr);
-        if (hardware->emulate_texture_buffer)
-            shader_map_is_sampler_buffer_emulated[shader] = is_sampler_buffer_emulated;
-    } else
-        LOG_E("Failed to convert glsl.")
-    CHECK_GL_ERROR
-}
-
-void glGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
-    LOG()
-    GLES.glGetShaderiv(shader, pname, params);
-    if (global_settings.ignore_error >= IgnoreErrorLevel::Partial && pname == GL_COMPILE_STATUS && !*params) {
-        GLchar infoLog[512];
-        GLES.glGetShaderInfoLog(shader, 512, nullptr, infoLog);
-        LOG_W_FORCE("Shader %d compilation failed: \n%s", shader, infoLog)
-        LOG_W_FORCE("Now try to cheat.")
-        *params = GL_TRUE;
-    }
-    CHECK_GL_ERROR
-}
-
-GLuint glCreateShader(GLenum shaderType) {
-    if (global_settings.fsr1_setting != FSR1_Quality_Preset::Disabled && !fsrInitialized) {
-        InitFSRResources();
+    // Check if it's already an ES shader (passthrough)
+    if (is_direct_shader(glsl_code.c_str())) {
+        LOG_D("Direct ES shader, passing through")
+        GLES.glShaderSource(shader, count, string, length);
+        return;
     }
 
-    LOG()
-    LOG_D("glCreateShader(%s)", glEnumToString(shaderType))
-    GLuint shader = GLES.glCreateShader(shaderType);
-    if (shader != 0 && hardware->emulate_texture_buffer) shader_map_is_sampler_buffer_emulated[shader] = false;
-    CHECK_GL_ERROR
-    return shader;
+    // Convert GLSL → GLSL ES
+    uint essl_version = 320; // target ES 3.2
+    int return_code = -1;
+    std::string converted = GLSLtoGLSLES(glsl_code.c_str(), shaderType, essl_version, 0, return_code);
+
+    if (return_code < 0) {
+        // Conversion failed, pass through original
+        LOG_E("GLSL conversion failed, passing through original")
+        GLES.glShaderSource(shader, count, string, length);
+        return;
+    }
+
+    LOG_D("Converted GLSL ES:\n%s", converted.c_str())
+
+    // Set the converted GLSL ES source
+    const char* converted_code = converted.c_str();
+    GLES.glShaderSource(shader, 1, &converted_code, nullptr);
 }
