@@ -12,10 +12,10 @@
 // Pipeline:
 //   1. Preprocess  – strip #line, upgrade legacy syntax, inject Iris macros
 //   2. glslang      – parse desktop GLSL as EShClientOpenGL, emit SPIR-V 1.5
-//   3. spirv-cross  – consume SPIR-V, emit GLSL ES 3.2 (or 3.1/3.0)
+//   3. spirv-cross  – consume SPIR-V, emit GLSL ES 3.2
 //   4. Post-process – remove layout(binding), fix precision, add extensions
 //
-// Target: OpenGL ES 3.2 (default), fallback to ES 3.1 / 3.0
+// Target: OpenGL ES 3.2
 // ============================================================================
 
 #include "glsl_for_es.h"
@@ -61,16 +61,10 @@ static int map_glsl_to_opengl_version(int glsl_version) {
     return 330; // minimum for core profile
 }
 
-// Map desktop GLSL version → ESSL version
+// Map desktop GLSL version → ESSL version (always ES 3.2)
 static int map_glsl_to_essl_version(int glsl_version) {
-    if (glsl_version >= 450) return 320;
-    if (glsl_version >= 430) return 320;
-    if (glsl_version >= 420) return 310;
-    if (glsl_version >= 400) return 310;
-    if (glsl_version >= 330) return 300;
-    if (glsl_version >= 150) return 300;
-    if (glsl_version >= 140) return 300;
-    return 300;
+    (void)glsl_version;
+    return 320;
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,8 +1094,8 @@ std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, GL
 
     spvc_compiler_create_compiler_options(compiler_glsl, &options);
 
-    // Set GLSL ES version (default to 320 for ES 3.2)
-    uint target_essl = essl_version >= 320 ? 320 : (essl_version >= 310 ? 310 : 300);
+    // Set GLSL ES version (always 320 for ES 3.2)
+    uint target_essl = 320;
     spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_GLSL_VERSION, target_essl);
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_ES, SPVC_TRUE);
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_ES_DEFAULT_FLOAT_PRECISION_HIGHP, SPVC_TRUE);
@@ -1117,14 +1111,10 @@ std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, GL
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_EMIT_PUSH_CONSTANT_AS_UNIFORM_BUFFER, SPVC_FALSE);
 
     // Support for geometry shaders (ES 3.2 via GL_EXT_geometry_shader)
-    if (target_essl >= 310) {
-        spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_SUPPORT_NONZERO_BASE_INSTANCE, SPVC_TRUE);
-    }
+    spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_SUPPORT_NONZERO_BASE_INSTANCE, SPVC_TRUE);
 
     // Use separate shader objects layout (ES 3.1+)
-    if (target_essl >= 310) {
-        spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_SEPARATE_SHADER_OBJECTS, SPVC_TRUE);
-    }
+    spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_SEPARATE_SHADER_OBJECTS, SPVC_TRUE);
 
     spvc_compiler_install_compiler_options(compiler_glsl, options);
 
@@ -1168,19 +1158,9 @@ static void add_required_extensions(std::string& essl, GLenum shader_type, uint 
     }
 
     // Compute shader needs no extension on ES 3.1+
-    // But image load/store needs GL_EXT_shader_image_load_store on ES 3.1
-    if (essl.find("image") != std::string::npos && essl.find("layout") != std::string::npos) {
-        if (essl_version < 320) {
-            extensions += "#extension GL_EXT_shader_image_load_store : require\n";
-        }
-    }
+    // Image load/store is natively supported in ES 3.2
 
-    // SSBO support
-    if (essl.find("buffer ") != std::string::npos) {
-        if (essl_version < 310) {
-            extensions += "#extension GL_EXT_shader_io_blocks : require\n";
-        }
-    }
+    // SSBO is natively supported in ES 3.2
 
     if (!extensions.empty()) {
         size_t version_end = essl.find('\n');
