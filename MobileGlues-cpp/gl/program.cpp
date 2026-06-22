@@ -9,6 +9,7 @@
 #include "program.h"
 #include "../gles/loader.h"
 #include "log.h"
+#include "mg.h"
 #include <GL/gl.h>
 #include <cstring>
 
@@ -164,7 +165,7 @@ void glGetShaderiv(GLuint shader, GLenum pname, GLint* params) { GLES.glGetShade
 void glGetShaderInfoLog(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* infoLog) { GLES.glGetShaderInfoLog(shader, bufSize, length, infoLog); }
 
 void glBindAttribLocation(GLuint program, GLuint index, const GLchar* name) { GLES.glBindAttribLocation(program, index, name); }
-void glBindFragDataLocation(GLuint program, GLuint color, const GLchar* name) { GLES.glBindFragDataLocation(program, color, name); }
+void glBindFragDataLocation(GLuint program, GLuint color, const GLchar* name) { GLES.glBindFragDataLocationEXT(program, color, name); }
 GLint glGetAttribLocation(GLuint program, const GLchar* name) { return GLES.glGetAttribLocation(program, name); }
 GLint glGetFragDataLocation(GLuint program, const GLchar* name) { return GLES.glGetFragDataLocation(program, name); }
 

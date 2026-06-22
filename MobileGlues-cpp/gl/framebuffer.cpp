@@ -7,6 +7,7 @@
 
 #include "framebuffer.h"
 #include "log.h"
+#include "mg.h"
 #include "../config/settings.h"
 #include "FSR1/FSR1.h"
 
