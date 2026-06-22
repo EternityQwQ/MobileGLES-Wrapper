@@ -20,6 +20,9 @@ FUNC_GL_STATE_UINT(current_program)
 FUNC_GL_STATE_UINT(current_tex_unit)
 FUNC_GL_STATE_UINT(current_draw_fbo)
 
+UnorderedMap<GLuint, bool> program_map_is_sampler_buffer_emulated;
+UnorderedMap<GLuint, bool> program_map_is_atomic_counter_emulated;
+
 FILE* file;
 
 void start_log() {
