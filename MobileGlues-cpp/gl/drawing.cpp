@@ -5,6 +5,26 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
+// ============================================================================
+// Drawing Module Architecture (OpenGL ES 3.2)
+//
+// Rule: "ES 3.2 native → native, ES 3.2 not native → CPU simulation"
+//
+// Native (ES 3.2 directly supports):
+//   - glDrawElements, glDrawElementsInstanced, glDrawElementsBaseVertex
+//   - glDrawArrays, glDrawArraysInstanced, glDrawRangeElements
+//   - glDrawArraysIndirect, glDrawElementsIndirect
+//   - glClear
+//
+// CPU simulation (ES 3.2 does NOT support):
+//   - glMultiDrawArrays → loop over glDrawArrays
+//   - glMultiDrawElements → redirected in multidraw.cpp
+//   - glMultiDrawElementsBaseVertex → redirected in multidraw.cpp
+//
+// Other functions (not draw calls, keep existing logic):
+//   - glBindImageTexture, glUniform1i, glDispatchCompute, glMemoryBarrier
+// ============================================================================
+
 #include "drawing.h"
 #include "buffer.h"
 #include "framebuffer.h"
@@ -14,6 +34,10 @@
 
 #define DEBUG 0
 
+// ============================================================================
+// Module-level state: sampler buffer emulation
+// ============================================================================
+
 GLuint bufSampelerProg;
 GLuint bufSampelerLoc;
 std::string bufSampelerName;
@@ -22,6 +46,10 @@ extern UnorderedMap<GLuint, bool> program_map_is_sampler_buffer_emulated;
 extern UnorderedMap<GLuint, bool> program_map_is_atomic_counter_emulated;
 
 UnorderedMap<GLuint, SamplerInfo> g_samplerCacheForSamplerBuffer;
+
+// ============================================================================
+// Internal helpers
+// ============================================================================
 
 void setupBufferTextureUniforms(GLuint program) {
     LOG_D("setupBufferTextureUniforms, program: %d", program);
@@ -91,6 +119,10 @@ void setupBufferTextureUniforms(GLuint program) {
     }
 }
 
+// ============================================================================
+// Common draw preparation (called before every draw call)
+// ============================================================================
+
 void prepareForDraw() {
     LOG_D("prepareForDraw...")
     if (hardware->emulate_texture_buffer) {
@@ -98,6 +130,20 @@ void prepareForDraw() {
     }
 }
 
+// ============================================================================
+// Native draw calls (ES 3.2 directly supports)
+// ============================================================================
+
+// --- glDrawElements (native) ---
+void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+    LOG()
+    LOG_D("glDrawElements, mode: %d, count: %d, type: %d, indices: %p", mode, count, type, indices)
+    prepareForDraw();
+    GLES.glDrawElements(mode, count, type, indices);
+    CHECK_GL_ERROR
+}
+
+// --- glDrawElementsInstanced (native) ---
 void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei primcount) {
     LOG()
     LOG_D("glDrawElementsInstanced, mode: %d, count: %d, type: %d, indices: %p, primcount: %d", mode, count, type,
@@ -107,13 +153,90 @@ void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void
     CHECK_GL_ERROR
 }
 
-void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+// --- glDrawElementsBaseVertex (native) ---
+void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex) {
     LOG()
-    LOG_D("glDrawElements, mode: %d, count: %d, type: %d, indices: %p", mode, count, type, indices)
+    LOG_D("glDrawElementsBaseVertex, mode: %d, count: %d, type: %d, indices: %p, basevertex: %d", mode, count, type,
+          indices, basevertex);
     prepareForDraw();
-    GLES.glDrawElements(mode, count, type, indices);
+    GLES.glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
     CHECK_GL_ERROR
 }
+
+// --- glDrawArrays (native) ---
+void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+    LOG()
+    LOG_D("glDrawArrays, mode: %d, first: %d, count: %d", mode, first, count)
+    prepareForDraw();
+    GLES.glDrawArrays(mode, first, count);
+    CHECK_GL_ERROR
+}
+
+// --- glDrawArraysInstanced (native) ---
+void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) {
+    LOG()
+    LOG_D("glDrawArraysInstanced, mode: %d, first: %d, count: %d, instancecount: %d", mode, first, count, instancecount)
+    prepareForDraw();
+    GLES.glDrawArraysInstanced(mode, first, count, instancecount);
+    CHECK_GL_ERROR
+}
+
+// --- glDrawRangeElements (native) ---
+void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices) {
+    LOG()
+    LOG_D("glDrawRangeElements, mode: %d, start: %d, end: %d, count: %d, type: %d, indices: %p", mode, start, end,
+          count, type, indices)
+    prepareForDraw();
+    GLES.glDrawRangeElements(mode, start, end, count, type, indices);
+    CHECK_GL_ERROR
+}
+
+// --- glDrawArraysIndirect (native) ---
+void glDrawArraysIndirect(GLenum mode, const void* indirect) {
+    LOG()
+    LOG_D("glDrawArraysIndirect, mode: %d, indirect: %p", mode, indirect)
+    prepareForDraw();
+    GLES.glDrawArraysIndirect(mode, indirect);
+    CHECK_GL_ERROR
+}
+
+// --- glDrawElementsIndirect (native) ---
+void glDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect) {
+    LOG()
+    LOG_D("glDrawElementsIndirect, mode: %d, type: %d, indirect: %p", mode, type, indirect)
+    prepareForDraw();
+    GLES.glDrawElementsIndirect(mode, type, indirect);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// CPU-simulated draw calls (ES 3.2 does NOT support natively)
+// ============================================================================
+
+// --- glMultiDrawArrays (CPU simulation: loop over glDrawArrays) ---
+void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GLsizei drawcount) {
+    LOG()
+    LOG_D("glMultiDrawArrays, mode: %d, drawcount: %d (CPU simulation)", mode, drawcount)
+    prepareForDraw();
+
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        if (count[i] > 0) {
+            GLES.glDrawArrays(mode, first[i], count[i]);
+        }
+    }
+
+    CHECK_GL_ERROR
+}
+
+// --- glMultiDrawElements (redirected in multidraw.cpp) ---
+// Defined in multidraw.cpp – keep as-is.
+
+// --- glMultiDrawElementsBaseVertex (redirected in multidraw.cpp) ---
+// Defined in multidraw.cpp – keep as-is.
+
+// ============================================================================
+// Other functions (keep existing logic)
+// ============================================================================
 
 void glBindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access,
                         GLenum format) {
@@ -154,14 +277,5 @@ void glMemoryBarrier(GLbitfield barriers) {
         barriers |= GL_SHADER_STORAGE_BARRIER_BIT;
     }
     GLES.glMemoryBarrier(barriers);
-    CHECK_GL_ERROR
-}
-
-void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex) {
-    LOG()
-    LOG_D("glDrawElementsBaseVertex, mode: %d, count: %d, type: %d, indices: %p, basevertex: %d", mode, count, type,
-          indices, basevertex);
-    prepareForDraw();
-    GLES.glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
     CHECK_GL_ERROR
 }

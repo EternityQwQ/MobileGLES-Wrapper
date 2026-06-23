@@ -4,6 +4,11 @@
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
+//
+// Architecture: "ES 3.2 native → native, ES 3.2 not native → CPU simulation"
+//   - Queries that exist in ES 3.2 core are forwarded directly to GLES.
+//   - Queries that do NOT exist in ES 3.2 core (desktop GL queries) are
+//     simulated via CPU-side logic, caching, or synthetic responses.
 
 #include "getter.h"
 #include "buffer.h"
@@ -17,19 +22,39 @@
 
 #define DEBUG 0
 
+// =============================================================================
+// Section: Global State
+// =============================================================================
+
 Version GLVersion;
+
+// =============================================================================
+// Section: glGetIntegerv
+//   ES 3.2 native queries → forwarded to GLES.glGetIntegerv
+//   Non-native (desktop) queries → CPU simulation
+// =============================================================================
 
 void glGetIntegerv(GLenum pname, GLint* params) {
     LOG()
     LOG_D("glGetIntegerv, pname: %s", glEnumToString(pname))
     switch (pname) {
+
+    // -------------------------------------------------------------------------
+    // GL_BACKEND_GETTER_MG offset: strip wrapper prefix and forward to GLES
+    // -------------------------------------------------------------------------
     case GL_NUM_EXTENSIONS + GL_BACKEND_GETTER_MG:
         GLES.glGetIntegerv(pname - GL_BACKEND_GETTER_MG, params);
         return;
+
+    // -------------------------------------------------------------------------
+    // Desktop GL queries — CPU simulation (not in ES 3.2 core)
+    // -------------------------------------------------------------------------
+
     case GL_CONTEXT_PROFILE_MASK:
         (*params) = GL_CONTEXT_CORE_PROFILE_BIT;
         break;
-    case GL_NUM_EXTENSIONS:
+
+    case GL_NUM_EXTENSIONS: {
         static GLint num_extensions = -1;
         if (num_extensions == -1) {
             const GLubyte* ext_str = glGetString(GL_EXTENSIONS);
@@ -42,31 +67,39 @@ void glGetIntegerv(GLenum pname, GLint* params) {
                     num_extensions++;
                     copy_str.erase(0, pos + 1);
                 }
-                if (!copy_str.empty()) num_extensions++; // Count the last token
+                if (!copy_str.empty()) num_extensions++;
             } else {
                 num_extensions = 0;
             }
         }
         (*params) = num_extensions;
         break;
+    }
+
     case GL_MAJOR_VERSION:
         (*params) = GLVersion.Major;
         break;
+
     case GL_MINOR_VERSION:
         (*params) = GLVersion.Minor;
         break;
+
     case GL_MAX_TEXTURE_IMAGE_UNITS: {
         int es_params = 16;
         GLES.glGetIntegerv(pname, &es_params);
         CHECK_GL_ERROR(*params) = es_params * 2;
-        // Why is the real GL_MAX_TEXTURE_IMAGE_UNITS bigger than what GLES.glGetIntegerv returns?
         break;
     }
-    case GL_CONTEXT_FLAGS: {
-        (*params) =
-            GL_CONTEXT_FLAG_ROBUST_ACCESS_BIT | GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT | GL_CONTEXT_FLAG_NO_ERROR_BIT;
+
+    case GL_CONTEXT_FLAGS:
+        (*params) = GL_CONTEXT_FLAG_ROBUST_ACCESS_BIT
+                  | GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT
+                  | GL_CONTEXT_FLAG_NO_ERROR_BIT;
         break;
-    }
+
+    // -------------------------------------------------------------------------
+    // Buffer binding queries — CPU simulation via our own binding tracking
+    // -------------------------------------------------------------------------
     case GL_ARRAY_BUFFER_BINDING:
     case GL_ATOMIC_COUNTER_BUFFER_BINDING:
     case GL_COPY_READ_BUFFER_BINDING:
@@ -82,9 +115,17 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         (*params) = (int)find_bound_buffer(pname);
         LOG_D("  -> %d", *params)
         break;
+
+    // -------------------------------------------------------------------------
+    // VAO binding query — CPU simulation via our own binding tracking
+    // -------------------------------------------------------------------------
     case GL_VERTEX_ARRAY_BINDING:
         (*params) = (int)find_bound_array();
         break;
+
+    // -------------------------------------------------------------------------
+    // All other queries — forward to native ES 3.2 GLES
+    // -------------------------------------------------------------------------
     default:
         GLES.glGetIntegerv(pname, params);
         LOG_D("  -> %d", *params)
@@ -92,19 +133,27 @@ void glGetIntegerv(GLenum pname, GLint* params) {
     }
 }
 
+// =============================================================================
+// Section: glGetError
+//   Always returns GL_NO_ERROR. Internal GLES errors are silently consumed.
+// =============================================================================
+
 GLenum glGetError() {
     LOG()
     GLenum err = GLES.glGetError();
-    // just clear gles error, no reporting
     if (err != GL_NO_ERROR) {
-        // no logging without DEBUG
         LOG_W("glGetError\n -> %d", err)
         LOG_W("Now try to cheat.")
     }
     return GL_NO_ERROR;
 }
 
+// =============================================================================
+// Section: Extension Management
+// =============================================================================
+
 static std::string es_ext;
+
 std::string GetExtensionsList() {
     return es_ext;
 }
@@ -118,27 +167,29 @@ void InitGLESBaseExtensions() {
         extensions.push_back("GL_MG_settings_string_dump");
     }
 
-    const char* base_exts[] = {"GL_ARB_fragment_program",
-                               "GL_ARB_vertex_buffer_object",
-                               "GL_ARB_vertex_array_object",
-                               "GL_ARB_vertex_buffer",
-                               "GL_EXT_vertex_array",
-                               "GL_ARB_ES2_compatibility",
-                               "GL_ARB_ES3_compatibility",
-                               "GL_EXT_packed_depth_stencil",
-                               "GL_EXT_depth_texture",
-                               "GL_ARB_depth_texture",
-                               "GL_ARB_shading_language_100",
-                               "GL_ARB_imaging",
-                               "GL_ARB_draw_buffers_blend",
-                               "OpenGL15",
-                               "GL_ARB_shader_storage_buffer_object",
-                               "GL_ARB_shader_image_load_store",
-                               "GL_ARB_clear_texture",
-                               "GL_ARB_get_program_binary",
-                               "GL_ARB_separate_shader_objects",
-                               "GL_ARB_multi_bind",
-                               "GL_KHR_no_error"};
+    const char* base_exts[] = {
+        "GL_ARB_fragment_program",
+        "GL_ARB_vertex_buffer_object",
+        "GL_ARB_vertex_array_object",
+        "GL_ARB_vertex_buffer",
+        "GL_EXT_vertex_array",
+        "GL_ARB_ES2_compatibility",
+        "GL_ARB_ES3_compatibility",
+        "GL_EXT_packed_depth_stencil",
+        "GL_EXT_depth_texture",
+        "GL_ARB_depth_texture",
+        "GL_ARB_shading_language_100",
+        "GL_ARB_imaging",
+        "GL_ARB_draw_buffers_blend",
+        "OpenGL15",
+        "GL_ARB_shader_storage_buffer_object",
+        "GL_ARB_shader_image_load_store",
+        "GL_ARB_clear_texture",
+        "GL_ARB_get_program_binary",
+        "GL_ARB_separate_shader_objects",
+        "GL_ARB_multi_bind",
+        "GL_KHR_no_error",
+    };
 
     extensions.insert(extensions.end(), std::begin(base_exts), std::end(base_exts));
 
@@ -161,7 +212,11 @@ void AppendExtension(const char* ext) {
     es_ext += ' ';
 }
 
-std::string getBeforeThirdSpace(const std::string& str) {
+// =============================================================================
+// Section: GPU Name Helpers
+// =============================================================================
+
+static std::string getBeforeThirdSpace(const std::string& str) {
     int spaceCount = 0;
     size_t endPos = 0;
     for (size_t i = 0; i < str.length(); ++i) {
@@ -174,11 +229,10 @@ std::string getBeforeThirdSpace(const std::string& str) {
         }
         if (spaceCount < 3) endPos = str.length();
     }
-
     return str.substr(0, endPos);
 }
 
-std::string getGpuName() {
+static std::string getGpuName() {
     std::string gpuName = std::string((char*)GLES.glGetString(GL_RENDERER));
 
     if (gpuName.empty()) {
@@ -190,10 +244,8 @@ std::string getGpuName() {
         if (gpuName.length() < 25) {
             return gpuName;
         }
-
         std::string gpu = gpuName.substr(23, gpuName.length() - 24);
-        std::string formattedGpuName = gpu + " | MetalANGLE | Metal";
-        return formattedGpuName;
+        return gpu + " | MetalANGLE | Metal";
     }
 
     // Vulkan ANGLE
@@ -201,19 +253,20 @@ std::string getGpuName() {
         size_t firstParen = gpuName.find('(');
         size_t secondParen = gpuName.find('(', firstParen + 1);
         size_t lastParen = gpuName.rfind('(');
-
         std::string gpu = gpuName.substr(secondParen + 1, lastParen - secondParen - 2);
 
         size_t vulkanStart = gpuName.find("Vulkan ");
         size_t vulkanEnd = gpuName.find(' ', vulkanStart + 7);
         std::string vulkanVersion = gpuName.substr(vulkanStart + 7, vulkanEnd - (vulkanStart + 7));
 
-        std::string formattedGpuName = gpu + " | ANGLE | Vulkan " + vulkanVersion;
-
-        return formattedGpuName;
+        return gpu + " | ANGLE | Vulkan " + vulkanVersion;
     }
 
     return gpuName;
+}
+
+static std::string getGLESName() {
+    return getBeforeThirdSpace(std::string((char*)GLES.glGetString(GL_VERSION)));
 }
 
 void set_es_version() {
@@ -222,22 +275,29 @@ void set_es_version() {
     LOG_I("OpenGL ES Version: %s (%d)", ESVersionStr.c_str(), hardware->es_version)
 }
 
-std::string getGLESName() {
-    return getBeforeThirdSpace(std::string((char*)GLES.glGetString(GL_VERSION)));
-}
+// =============================================================================
+// Section: glGetString
+//   Custom vendor / version / renderer / extensions strings (CPU simulation).
+//   Non-overridden names → forwarded to GLES.glGetString (native).
+// =============================================================================
 
 static std::string rendererString;
 static std::string vendorString;
 static std::string versionString;
+
 const GLubyte* glGetString(GLenum name) {
     LOG()
     LOG_D("glGetString, %s", glEnumToString(name))
+
     switch (name) {
+
+    // -------------------------------------------------------------------------
+    // GL_VENDOR — synthetic vendor string
+    // -------------------------------------------------------------------------
     case GL_VENDOR: {
         if (vendorString.empty()) {
             if (global_settings.hide_mg_env_level == HideMGEnvLevel::Disabled) {
-                std::string vendor = "Swung0x48, BZLZHH, Tungsten, EternityQwQ";
-                vendorString = vendor;
+                vendorString = "Swung0x48, BZLZHH, Tungsten, EternityQwQ";
             } else {
                 const char choices[] = "AINM";
                 vendorString = choices[rand() % 4];
@@ -254,6 +314,10 @@ const GLubyte* glGetString(GLenum name) {
         }
         return (const GLubyte*)vendorString.c_str();
     }
+
+    // -------------------------------------------------------------------------
+    // GL_VERSION — synthetic version string
+    // -------------------------------------------------------------------------
     case GL_VERSION: {
         if (versionString.empty()) {
             versionString = GLVersion.toString();
@@ -264,7 +328,6 @@ const GLubyte* glGetString(GLenum name) {
                     Version defaultVersion = Version(DEFAULT_GL_VERSION);
                     versionString += " §4§l(" + defaultVersion.toString() + ") MobileGLESWrapper§r ";
                 }
-
                 versionString += std::to_string(MAJOR) + "." + std::to_string(MINOR) + "." + std::to_string(REVISION);
 #if PATCH != 0
                 versionString += "." + std::to_string(PATCH);
@@ -297,20 +360,24 @@ const GLubyte* glGetString(GLenum name) {
                 randStrOpts2.minLength = 1;
                 randStrOpts2.maxLength = 4;
 
-                versionString += std::to_string(MAJOR) + GenerateRandomString(randStrOpts2) + std::to_string(MINOR) +
-                                 GenerateRandomString(randStrOpts2) + std::to_string(REVISION) +
-                                 GenerateRandomString(randStrOpts2) + std::to_string(PATCH) +
-                                 GenerateRandomString(randStrOpts2);
+                versionString += std::to_string(MAJOR) + GenerateRandomString(randStrOpts2)
+                               + std::to_string(MINOR) + GenerateRandomString(randStrOpts2)
+                               + std::to_string(REVISION) + GenerateRandomString(randStrOpts2)
+                               + std::to_string(PATCH) + GenerateRandomString(randStrOpts2);
             }
         }
         return (const GLubyte*)versionString.c_str();
     }
+
+    // -------------------------------------------------------------------------
+    // GL_RENDERER — synthetic renderer string from GPU + GLES names
+    // -------------------------------------------------------------------------
     case GL_RENDERER: {
-        if (rendererString == std::string("")) {
+        if (rendererString.empty()) {
             if (global_settings.hide_mg_env_level == HideMGEnvLevel::Disabled) {
                 std::string gpuName = getGpuName();
                 std::string glesName = getGLESName();
-                rendererString = std::string(gpuName) + " | " + std::string(glesName);
+                rendererString = gpuName + " | " + glesName;
             } else {
                 const char choices[] = "AINM";
                 rendererString = choices[rand() % 4];
@@ -339,15 +406,16 @@ const GLubyte* glGetString(GLenum name) {
         }
         return (const GLubyte*)rendererString.c_str();
     }
+
+    // -------------------------------------------------------------------------
+    // GL_SHADING_LANGUAGE_VERSION — synthetic shading language version
+    // -------------------------------------------------------------------------
     case GL_SHADING_LANGUAGE_VERSION: {
         static std::string shadingLangString;
-
         if (shadingLangString.empty()) {
             std::string baseVer = "4.60";
-
             if (global_settings.hide_mg_env_level >= HideMGEnvLevel::Level1) {
                 shadingLangString = baseVer;
-
                 int junkCount = rand() % 2 + 1;
                 for (int i = 0; i < junkCount; ++i) {
                     shadingLangString += " ";
@@ -363,22 +431,34 @@ const GLubyte* glGetString(GLenum name) {
                 shadingLangString = baseVer + " MobileGLESWrapper with glslang and SPIRV-Cross";
             }
         }
-
         return reinterpret_cast<const GLubyte*>(shadingLangString.c_str());
     }
+
+    // -------------------------------------------------------------------------
+    // GL_EXTENSIONS — from our managed extension list
+    // -------------------------------------------------------------------------
     case GL_EXTENSIONS: {
         static std::string cached;
         cached = GetExtensionsList();
         return (const GLubyte*)cached.c_str();
     }
+
+    // -------------------------------------------------------------------------
+    // GL_SETTINGS_MG — dump settings string (MG custom query)
+    // -------------------------------------------------------------------------
     case GL_SETTINGS_MG: {
-        if (global_settings.hide_mg_env_level >= HideMGEnvLevel::Level1) return GLES.glGetString(name);
+        if (global_settings.hide_mg_env_level >= HideMGEnvLevel::Level1)
+            return GLES.glGetString(name);
 
         static char* settings_string = nullptr;
         std::string tmp = dump_settings_string("  ");
         settings_string = strdup(tmp.c_str());
         return reinterpret_cast<const GLubyte*>(settings_string);
     }
+
+    // -------------------------------------------------------------------------
+    // GL_BACKEND_GETTER_MG offset queries — strip prefix and forward to GLES
+    // -------------------------------------------------------------------------
     case GL_VERSION + GL_BACKEND_GETTER_MG:
     case GL_VENDOR + GL_BACKEND_GETTER_MG:
     case GL_RENDERER + GL_BACKEND_GETTER_MG:
@@ -388,13 +468,24 @@ const GLubyte* glGetString(GLenum name) {
             return GLES.glGetString(name - GL_BACKEND_GETTER_MG);
         else
             return GLES.glGetString(name);
+
+    // -------------------------------------------------------------------------
+    // All other string queries → forward to native GLES
+    // -------------------------------------------------------------------------
     default:
         return GLES.glGetString(name);
     }
 }
 
+// =============================================================================
+// Section: glGetStringi
+//   CPU simulation: tokenizes the synthetic glGetString output into parts,
+//   then returns the requested part by index.
+// =============================================================================
+
 const GLubyte* glGetStringi(GLenum name, GLuint index) {
     LOG()
+
     if (name == GL_EXTENSIONS + GL_BACKEND_GETTER_MG && global_settings.hide_mg_env_level == HideMGEnvLevel::Disabled) {
         return GLES.glGetStringi(name - GL_BACKEND_GETTER_MG, index);
     }
@@ -404,10 +495,14 @@ const GLubyte* glGetStringi(GLenum name, GLuint index) {
         const char** parts;
         GLuint count;
     } StringCache;
-    static StringCache caches[] = {{GL_EXTENSIONS, nullptr, 0},
-                                   {GL_VENDOR, nullptr, 0},
-                                   {GL_VERSION, nullptr, 0},
-                                   {GL_SHADING_LANGUAGE_VERSION, nullptr, 0}};
+
+    static StringCache caches[] = {
+        {GL_EXTENSIONS, nullptr, 0},
+        {GL_VENDOR, nullptr, 0},
+        {GL_VERSION, nullptr, 0},
+        {GL_SHADING_LANGUAGE_VERSION, nullptr, 0},
+    };
+
     static int initialized = 0;
     if (!initialized) {
         for (auto& cache : caches) {
@@ -448,7 +543,7 @@ const GLubyte* glGetStringi(GLenum name, GLuint index) {
                 start = end + 1;
                 end = copy_str.find_first_of(delimiter, start);
             }
-            token_str = copy_str.substr(start); // Get the last token
+            token_str = copy_str.substr(start);
             cache.parts = (const char**)realloc(cache.parts, (cache.count + 1) * sizeof(char*));
             cache.parts[cache.count++] = strdup(token_str.c_str());
         }
@@ -466,6 +561,11 @@ const GLubyte* glGetStringi(GLenum name, GLuint index) {
 
     return nullptr;
 }
+
+// =============================================================================
+// Section: glGetQueryObject — ES 3.2 native extensions
+//   Forwarded to GLES if the extension is available.
+// =============================================================================
 
 void glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params) {
     LOG()

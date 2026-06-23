@@ -1,3 +1,5 @@
+# MobileGLESWrapper - OpenGL on OpenGL ES 3.2
+# Architecture: ES 3.2 native → native pass-through, non-native → CPU simulation
 cmake_minimum_required(VERSION 3.22.1)
 project("mobileglues")
 enable_language(CXX)

@@ -5,6 +5,10 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
+// ============================================================================
+// ES 3.2 native → native, ES 3.2 not native → CPU simulation
+// ============================================================================
+
 #include "framebuffer.h"
 #include "log.h"
 #include "mg.h"
@@ -13,11 +17,16 @@
 
 #define DEBUG 0
 
+// ============================================================================
+// Internal State: Framebuffer Map Management
+// ============================================================================
+
 static GLint MAX_COLOR_ATTACHMENTS = 0;
 static GLint MAX_DRAW_BUFFERS = 0;
 GLuint current_draw_fbo = 0;
 GLuint current_read_fbo = 0;
 std::vector<framebuffer_t> framebuffers;
+
 void ensure_max_attachments() {
     if (MAX_COLOR_ATTACHMENTS == 0) {
         GLES.glGetIntegerv(GL_MAX_COLOR_ATTACHMENTS, &MAX_COLOR_ATTACHMENTS);
@@ -28,15 +37,18 @@ void ensure_max_attachments() {
         MAX_DRAW_BUFFERS = MAX_DRAW_BUFFERS > 0 ? MAX_DRAW_BUFFERS : 8;
     }
 }
+
 framebuffer_t& get_framebuffer(GLuint id) {
     if (id >= framebuffers.size()) {
         framebuffers.resize(id + 10);
     }
     return framebuffers[id];
 }
+
 void InitFramebufferMap(size_t expectedSize) {
     framebuffers.reserve(expectedSize);
 }
+
 void init_framebuffer(framebuffer_t& fbo) {
     if (!fbo.initialized) {
         fbo.color_attachments = new attachment_t[MAX_COLOR_ATTACHMENTS];
@@ -44,6 +56,41 @@ void init_framebuffer(framebuffer_t& fbo) {
         fbo.initialized = true;
     }
 }
+
+// ============================================================================
+// Framebuffer Object Lifecycle (ES 3.2 native, with FBO map)
+// ============================================================================
+
+void glGenFramebuffers(GLsizei n, GLuint* framebuffers_out) {
+    LOG()
+    LOG_D("glGenFramebuffers(%i, %p)", n, framebuffers_out)
+    GLES.glGenFramebuffers(n, framebuffers_out);
+    CHECK_GL_ERROR
+}
+
+void glDeleteFramebuffers(GLsizei n, const GLuint* framebuffers_in) {
+    LOG()
+    LOG_D("glDeleteFramebuffers(%i, %p)", n, framebuffers_in)
+    for (int i = 0; i < n; ++i) {
+        GLuint id = framebuffers_in[i];
+        if (id < framebuffers.size()) {
+            framebuffer_t& fbo = framebuffers[id];
+            if (fbo.initialized) {
+                delete[] fbo.color_attachments;
+                fbo.color_attachments = nullptr;
+                fbo.initialized = false;
+            }
+            fbo = framebuffer_t{};
+        }
+    }
+    GLES.glDeleteFramebuffers(n, framebuffers_in);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Framebuffer Binding (ES 3.2 native, with FBO map)
+// ============================================================================
+
 void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     ensure_max_attachments();
     framebuffer_t& fbo = get_framebuffer(framebuffer);
@@ -68,6 +115,11 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     }
     GLES.glBindFramebuffer(target, framebuffer);
 }
+
+// ============================================================================
+// Attachment Tracking Helpers
+// ============================================================================
+
 void update_attachment(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
     GLuint current_fbo = (target == GL_READ_FRAMEBUFFER) ? current_read_fbo : current_draw_fbo;
     if (current_fbo == 0) return;
@@ -81,20 +133,121 @@ void update_attachment(GLenum target, GLenum attachment, GLenum textarget, GLuin
         fbo.stencil_attachment = {textarget, texture, level};
     }
 }
+
+// ============================================================================
+// Framebuffer Texture Attachments (ES 3.2 native)
+// ============================================================================
+
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
     update_attachment(target, attachment, textarget, texture, level);
     GLES.glFramebufferTexture2D(target, attachment, textarget, texture, level);
 }
+
 void glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level) {
     update_attachment(target, attachment, GL_TEXTURE_2D, texture, level);
     GLES.glFramebufferTexture(target, attachment, texture, level);
 }
+
+void glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
+    LOG()
+    LOG_D("glFramebufferTextureLayer, target = %s, attachment = %s, texture = %d, level = %d, layer = %d",
+          glEnumToString(target), glEnumToString(attachment), texture, level, layer)
+    GLES.glFramebufferTextureLayer(target, attachment, texture, level, layer);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Framebuffer Renderbuffer Attachment (ES 3.2 native)
+// ============================================================================
+
+void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+    LOG()
+    LOG_D("glFramebufferRenderbuffer, target = %s, attachment = %s, renderbuffertarget = %s, renderbuffer = %d",
+          glEnumToString(target), glEnumToString(attachment), glEnumToString(renderbuffertarget), renderbuffer)
+    GLES.glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Framebuffer Status Check (ES 3.2 native)
+// ============================================================================
+
+GLenum glCheckFramebufferStatus(GLenum target) {
+    GLenum status = GLES.glCheckFramebufferStatus(target);
+    if (global_settings.ignore_error == IgnoreErrorLevel::Full && status != GL_FRAMEBUFFER_COMPLETE) {
+        return GL_FRAMEBUFFER_COMPLETE;
+    }
+    return status;
+}
+
+// ============================================================================
+// Framebuffer Blit (ES 3.2 native)
+// ============================================================================
+
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                       GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                       GLbitfield mask, GLenum filter) {
+    LOG()
+    LOG_D("glBlitFramebuffer, src = (%d,%d,%d,%d), dst = (%d,%d,%d,%d), mask = 0x%x, filter = %s",
+          srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, glEnumToString(filter))
+    GLES.glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Framebuffer Invalidation (ES 3.2 native)
+// ============================================================================
+
+void glInvalidateFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments) {
+    LOG()
+    LOG_D("glInvalidateFramebuffer, target = %s, numAttachments = %d", glEnumToString(target), numAttachments)
+    GLES.glInvalidateFramebuffer(target, numAttachments, attachments);
+    CHECK_GL_ERROR
+}
+
+void glInvalidateSubFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments,
+                                 GLint x, GLint y, GLsizei width, GLsizei height) {
+    LOG()
+    LOG_D("glInvalidateSubFramebuffer, target = %s, numAttachments = %d, rect = (%d,%d,%d,%d)",
+          glEnumToString(target), numAttachments, x, y, width, height)
+    GLES.glInvalidateSubFramebuffer(target, numAttachments, attachments, x, y, width, height);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Framebuffer Parameters (ES 3.2 native)
+// ============================================================================
+
+void glFramebufferParameteri(GLenum target, GLenum pname, GLint param) {
+    LOG()
+    LOG_D("glFramebufferParameteri, target = %s, pname = %s, param = %d", glEnumToString(target), glEnumToString(pname), param)
+    GLES.glFramebufferParameteri(target, pname, param);
+    CHECK_GL_ERROR
+}
+
+void glGetFramebufferParameteriv(GLenum target, GLenum pname, GLint* params) {
+    LOG()
+    LOG_D("glGetFramebufferParameteriv, target = %s, pname = %s", glEnumToString(target), glEnumToString(pname))
+    GLES.glGetFramebufferParameteriv(target, pname, params);
+    CHECK_GL_ERROR
+}
+
+void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint* params) {
+    LOG()
+    LOG_D("glGetFramebufferAttachmentParameteriv, target = %s, attachment = %s, pname = %s",
+          glEnumToString(target), glEnumToString(attachment), glEnumToString(pname))
+    GLES.glGetFramebufferAttachmentParameteriv(target, attachment, pname, params);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Draw Buffers (ES 3.2 native, with attachment remapping)
+// ============================================================================
+
 void glDrawBuffer(GLenum buffer) {
     LOG()
     LOG_D("glDrawBuffer %d", buffer)
 
-    //    GLint currentFBO;
-    //    GLES.glGetIntegerv(GL_FRAMEBUFFER_BINDING, &currentFBO);
     if (current_draw_fbo == 0) {
         GLenum buffers[] = {buffer};
         glDrawBuffers(1, buffers);
@@ -115,6 +268,7 @@ void glDrawBuffer(GLenum buffer) {
     }
     CHECK_GL_ERROR;
 }
+
 void glDrawBuffers(GLsizei n, const GLenum* bufs) {
     LOG()
     if (current_draw_fbo == 0) {
@@ -158,6 +312,11 @@ void glDrawBuffers(GLsizei n, const GLenum* bufs) {
     }
     GLES.glDrawBuffers(n, new_bufs.data());
 }
+
+// ============================================================================
+// Read Buffer (ES 3.2 native, with attachment remapping)
+// ============================================================================
+
 void glReadBuffer(GLenum src) {
     if (current_read_fbo != 0 && src >= GL_COLOR_ATTACHMENT0 && src < GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS) {
         framebuffer_t& fbo = framebuffers[current_read_fbo];
@@ -169,11 +328,4 @@ void glReadBuffer(GLenum src) {
     } else {
         GLES.glReadBuffer(src);
     }
-}
-GLenum glCheckFramebufferStatus(GLenum target) {
-    GLenum status = GLES.glCheckFramebufferStatus(target);
-    if (global_settings.ignore_error == IgnoreErrorLevel::Full && status != GL_FRAMEBUFFER_COMPLETE) {
-        return GL_FRAMEBUFFER_COMPLETE;
-    }
-    return status;
 }

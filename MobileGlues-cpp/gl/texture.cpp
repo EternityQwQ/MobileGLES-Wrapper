@@ -5,6 +5,31 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
+// ============================================================================
+// Texture Module Architecture (OpenGL ES 3.2)
+//
+// Rule: "ES 3.2 native → native, ES 3.2 not native → CPU simulation"
+//
+// Native (ES 3.2 directly supports):
+//   - glTexImage2D, glTexImage3D, glTexSubImage2D, glTexSubImage3D
+//   - glTexStorage2D, glTexStorage3D
+//   - glCompressedTexImage2D, glCompressedTexImage3D
+//   - glCompressedTexSubImage2D, glCompressedTexSubImage3D
+//   - glCopyTexImage2D, glCopyTexSubImage2D, glCopyTexSubImage3D
+//   - glGenerateMipmap
+//   - glTexParameterf, glTexParameteri, glTexParameteriv, glTexParameterfv
+//   - glGetTexParameteriv, glGetTexParameterfv
+//   - glGetTexLevelParameteriv, glGetTexLevelParameterfv
+//   - glTexBuffer, glTexBufferRange
+//   - glBindTexture (with 1D→2D mapping for legacy targets)
+//
+// CPU simulation (ES 3.2 does NOT support natively):
+//   - glTexImage1D → convert to 2D texture (height=1)
+//   - glTexSubImage1D → convert to 2D texture operation
+//   - glTexStorage1D → convert to 2D texture (height=1)
+//   - glCopyTexImage1D → stub (record metadata only)
+// ============================================================================
+
 #include "texture.h"
 #include "GLES3/gl32.h"
 
@@ -24,6 +49,10 @@
 
 #define DEBUG 0
 
+// ============================================================================
+// Internal helpers: mip level size calculation
+// ============================================================================
+
 int nlevel(int size, int level) {
     if (size) {
         size >>= level;
@@ -31,6 +60,10 @@ int nlevel(int size, int level) {
     }
     return size;
 }
+
+// ============================================================================
+// Texture target enum conversion
+// ============================================================================
 
 GLenum ConvertTextureTargetToGLEnum(TextureTarget target) {
     switch (target) {
@@ -70,18 +103,6 @@ GLenum ConvertTextureTargetToGLEnum(TextureTarget target) {
         return GL_TEXTURE_CUBE_MAP;
     case TextureTarget::PROXY_TEXTURE_CUBE_MAP:
         return GL_PROXY_TEXTURE_CUBE_MAP;
-    // case TextureTarget::TEXTURE_CUBE_MAP_POSITIVE_X: return
-    // GL_TEXTURE_CUBE_MAP_POSITIVE_X; case
-    // TextureTarget::TEXTURE_CUBE_MAP_NEGATIVE_X: return
-    // GL_TEXTURE_CUBE_MAP_NEGATIVE_X; case
-    // TextureTarget::TEXTURE_CUBE_MAP_POSITIVE_Y: return
-    // GL_TEXTURE_CUBE_MAP_POSITIVE_Y; case
-    // TextureTarget::TEXTURE_CUBE_MAP_NEGATIVE_Y: return
-    // GL_TEXTURE_CUBE_MAP_NEGATIVE_Y; case
-    // TextureTarget::TEXTURE_CUBE_MAP_POSITIVE_Z: return
-    // GL_TEXTURE_CUBE_MAP_POSITIVE_Z; case
-    // TextureTarget::TEXTURE_CUBE_MAP_NEGATIVE_Z: return
-    // GL_TEXTURE_CUBE_MAP_NEGATIVE_Z;
     case TextureTarget::TEXTURE_CUBE_MAP_ARRAY:
         return GL_TEXTURE_CUBE_MAP_ARRAY;
     case TextureTarget::PROXY_TEXTURE_CUBE_MAP_ARRAY:
@@ -147,6 +168,10 @@ TextureTarget ConvertGLEnumToTextureTarget(GLenum target) {
         return TextureTarget::UNKNWON;
     }
 }
+
+// ============================================================================
+// Texture map management (tracking bound texture objects)
+// ============================================================================
 
 const int MAX_TEXTURE_IMAGE_UNITS = 32;
 
@@ -250,6 +275,10 @@ TextureObject* mgGetTexObjectByID(unsigned texture) {
     }
     return BufferObjectsVec[texture];
 }
+
+// ============================================================================
+// Internal format conversion helper
+// ============================================================================
 
 // Inline mapping for various internal formats to format and type
 void internal_convert(GLenum* internal_format, GLenum* type, GLenum* format) {
@@ -472,19 +501,41 @@ void internal_convert(GLenum* internal_format, GLenum* type, GLenum* format) {
     }
 }
 
-void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
-    LOG()
-    pname = pname_convert(pname);
-    LOG_D("glTexParameterf, target: %d, pname: %d, param: %f", target, pname, param)
+// ============================================================================
+// Internal helpers: depth format detection, binding query
+// ============================================================================
 
-    if (pname == GL_TEXTURE_LOD_BIAS_QCOM && !g_gles_caps.GL_QCOM_texture_lod_bias) {
-        LOG_D("Does not support GL_QCOM_texture_lod_bias, skipped!")
-        return;
+static int is_depth_format(GLenum format) {
+    switch (format) {
+    case GL_DEPTH_COMPONENT:
+    case GL_DEPTH_COMPONENT16:
+    case GL_DEPTH_COMPONENT24:
+    case GL_DEPTH_COMPONENT32F:
+        return 1;
+    default:
+        return 0;
     }
-
-    GLES.glTexParameterf(target, pname, param);
-    CHECK_GL_ERROR
 }
+
+static GLenum get_binding_for_target(GLenum target) {
+    switch (target) {
+    case GL_TEXTURE_2D:
+        return GL_TEXTURE_BINDING_2D;
+    case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+    case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+    case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+    case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+        return GL_TEXTURE_BINDING_CUBE_MAP;
+    default:
+        return 0;
+    }
+}
+
+// ============================================================================
+// Convenience macro: get texture object from bound target
+// ============================================================================
 
 #define GET_TEXTURE_OBJECT(target)                                                                                     \
     unsigned __currentUnitIndex = GetCurrentTextureUnitIndex();                                                        \
@@ -497,39 +548,71 @@ void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
     auto& __bindingSlot = __currentUnit.GetBindingSlot(targetR);                                                       \
     auto tex = __bindingSlot.GetBoundObject()
 
-void glTexImage1D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLint border, GLenum format,
-                  GLenum type, const GLvoid* pixels) {
-    LOG()
-    LOG_D("glTexImage1D not implemented!")
-    LOG_D("glTexImage1D, target: %d, level: %d, internalFormat: %d, width: %d, "
-          "border: %d, format: %d, type: %d",
-          target, level, internalFormat, width, border, format, type)
-    internal_convert(reinterpret_cast<GLenum*>(&internalFormat), &type, &format);
+// ============================================================================
+// glBindTexture (native, with 1D→2D mapping for legacy targets)
+// ============================================================================
 
-    GLenum rtarget = map_tex_target(target);
-    if (rtarget == GL_PROXY_TEXTURE_1D) {
-        int max1 = 4096;
-        GLES.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max1);
-        set_gl_state_proxy_width(((width << level) > max1) ? 0 : width);
-        set_gl_state_proxy_intformat(internalFormat);
+void glBindTexture(GLenum target, GLuint texture) {
+    LOG()
+    LOG_D("glBindTexture(%s, %d)", glEnumToString(target), texture)
+    INIT_CHECK_GL_ERROR
+
+    if (hardware && gl_state && hardware->emulate_texture_buffer && target == GL_TEXTURE_BUFFER) {
+        GLES.glActiveTexture(GL_TEXTURE0 + 15);
+        GLES.glBindTexture(GL_TEXTURE_2D, texture);
+        GLES.glActiveTexture(GL_TEXTURE0 + gl_state->current_tex_unit);
+    } else {
+        GLES.glBindTexture(target, texture);
+    }
+    CHECK_GL_ERROR_NO_INIT
+
+    int currentUnitIndex = GetCurrentTextureUnitIndex();
+    auto& currentUnit = GetTextureUnit(currentUnitIndex);
+    auto targetR = ConvertGLEnumToTextureTarget(target);
+    if (targetR == TextureTarget::UNKNWON) {
+        LOG_E("glBindTexture: Unknown texture target: %s", glEnumToString(target));
+        return;
+    }
+    auto& bindingSlot = currentUnit.GetBindingSlot(targetR);
+    auto textureObject = GetOrCreateTextureObject(texture);
+    if (!textureObject) {
+        LOG_W("glBindTexture: Failed to get or create texture object for ID %d, it may be not tracked", texture);
+        return;
+    }
+    bindingSlot.Bind(textureObject);
+    textureObject->target = targetR;
+}
+
+void glDeleteTextures(GLsizei n, const GLuint* textures) {
+    LOG()
+    INIT_CHECK_GL_ERROR
+    GLES.glDeleteTextures(n, textures);
+    CHECK_GL_ERROR_NO_INIT
+
+    for (GLsizei i = 0; i < n; ++i) {
+        MarkTextureObjectForDeletion(textures[i]);
+    }
+}
+
+void glActiveTexture(GLenum texture) {
+    LOG()
+    LOG_D("glActiveTexture, texture = %s", glEnumToString(texture))
+    if (texture < GL_TEXTURE0 || texture >= GL_TEXTURE0 + MAX_TEXTURE_IMAGE_UNITS) {
+        LOG_E("Invalid texture enum: %s", glEnumToString(texture))
         return;
     }
 
-    GET_TEXTURE_OBJECT(target);
-    tex->target = ConvertGLEnumToTextureTarget(target);
-    tex->depth = 1;
-    tex->format = format;
-    tex->internal_format = internalFormat;
-    tex->width = width;
-    tex->height = 1;
-    tex->swizzle_param[0] = GL_RED;
-    tex->swizzle_param[1] = GL_GREEN;
-    tex->swizzle_param[2] = GL_BLUE;
-    tex->swizzle_param[3] = GL_ALPHA;
-
+    set_gl_state_current_tex_unit(texture - GL_TEXTURE0);
+    GLES.glActiveTexture(texture);
+    ActivateTextureUnit(texture - GL_TEXTURE0);
     CHECK_GL_ERROR
 }
 
+// ============================================================================
+// Native texture image specification (ES 3.2)
+// ============================================================================
+
+// --- glTexImage2D (native, with format conversion) ---
 void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const GLvoid* pixels) {
     LOG()
@@ -601,6 +684,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
     CHECK_GL_ERROR
 }
 
+// --- glTexImage3D (native, ES 3.2 supports it) ---
 void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLsizei depth,
                   GLint border, GLenum format, GLenum type, const GLvoid* pixels) {
     LOG()
@@ -615,7 +699,6 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
         GLES.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max1);
         set_gl_state_proxy_width(((width << level) > max1) ? 0 : width);
         set_gl_state_proxy_height(((height << level) > max1) ? 0 : height);
-        // set_gl_state_proxy_depth(((depth << level) > max1) ? 0 : depth);
         set_gl_state_proxy_intformat(internalFormat);
         return;
     }
@@ -636,27 +719,43 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
     CHECK_GL_ERROR
 }
 
-void glTexStorage1D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width) {
+// --- glTexSubImage2D (native, with format conversion) ---
+void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height,
+                     GLenum format, GLenum type, const void* pixels) {
     LOG()
-    LOG_D("glTexStorage1D not implemented!")
-    LOG_D("glTexStorage1D, target: %d, levels: %d, internalFormat: %d, width: %d", target, levels, internalFormat,
-          width)
-    internal_convert(&internalFormat, nullptr, nullptr);
 
-    GET_TEXTURE_OBJECT(target);
-    tex->target = ConvertGLEnumToTextureTarget(target);
-    tex->internal_format = internalFormat;
-    tex->width = width;
-    tex->height = 1;
-    tex->depth = 1;
-    tex->swizzle_param[0] = GL_RED;
-    tex->swizzle_param[1] = GL_GREEN;
-    tex->swizzle_param[2] = GL_BLUE;
-    tex->swizzle_param[3] = GL_ALPHA;
+    LOG_D("glTexSubImage2D, target = %s, level = %d, xoffset = %d, yoffset = %d, "
+          "width = %d, height = %d, format = %s, type = %s, pixels = 0x%x",
+          glEnumToString(target), level, xoffset, yoffset, width, height, glEnumToString(format), glEnumToString(type),
+          pixels)
+
+    if (format == GL_BGRA && (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV)) {
+        glTexParameteri(target, GL_TEXTURE_SWIZZLE_R,  GL_BLUE);
+        glTexParameteri(target, GL_TEXTURE_SWIZZLE_B,  GL_RED);
+
+        format = GL_RGBA;
+        type = GL_UNSIGNED_BYTE;
+    }
+
+    GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
 
     CHECK_GL_ERROR
 }
 
+// --- glTexSubImage3D (native) ---
+void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width,
+                     GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels) {
+    LOG()
+    LOG_D("glTexSubImage3D, target: %s, level: %d, xoffset: %d, yoffset: %d, zoffset: %d, "
+          "width: %d, height: %d, depth: %d, format: %s, type: %s",
+          glEnumToString(target), level, xoffset, yoffset, zoffset, width, height, depth, glEnumToString(format),
+          glEnumToString(type))
+
+    GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
+    CHECK_GL_ERROR
+}
+
+// --- glTexStorage2D (native) ---
 void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width, GLsizei height) {
     LOG()
     LOG_D("glTexStorage2D, target: %d, levels: %d, internalFormat: %d, width: "
@@ -681,6 +780,7 @@ void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat, GLsize
     if (ERR != GL_NO_ERROR) LOG_E("glTexStorage2D ERROR: %d", ERR)
 }
 
+// --- glTexStorage3D (native) ---
 void glTexStorage3D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width, GLsizei height,
                     GLsizei depth) {
     LOG()
@@ -706,19 +806,25 @@ void glTexStorage3D(GLenum target, GLsizei levels, GLenum internalFormat, GLsize
     CHECK_GL_ERROR
 }
 
-void glCopyTexImage1D(GLenum target, GLint level, GLenum internalFormat, GLint x, GLint y, GLsizei width,
-                      GLint border) {
+// ============================================================================
+// Native compressed texture functions (ES 3.2)
+// ============================================================================
+
+// --- glCompressedTexImage2D (native) ---
+void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height,
+                            GLint border, GLsizei imageSize, const void* data) {
     LOG()
-    LOG_D("glCopyTexImage1D not implemented!")
-    LOG_D("glCopyTexImage1D, target: %d, level: %d, internalFormat: %d, x: %d, "
-          "y: %d, width: %d, border: %d",
-          target, level, internalFormat, x, y, width, border)
+    LOG_D("glCompressedTexImage2D, target: %s, level: %d, internalformat: %s, width: %d, height: %d, "
+          "border: %d, imageSize: %d",
+          glEnumToString(target), level, glEnumToString(internalformat), width, height, border, imageSize)
+
+    GLES.glCompressedTexImage2D(target, level, internalformat, width, height, border, imageSize, data);
 
     GET_TEXTURE_OBJECT(target);
     tex->target = ConvertGLEnumToTextureTarget(target);
-    tex->internal_format = internalFormat;
+    tex->internal_format = internalformat;
     tex->width = width;
-    tex->height = 1;
+    tex->height = height;
     tex->depth = 1;
     tex->swizzle_param[0] = GL_RED;
     tex->swizzle_param[1] = GL_GREEN;
@@ -728,34 +834,62 @@ void glCopyTexImage1D(GLenum target, GLint level, GLenum internalFormat, GLint x
     CHECK_GL_ERROR
 }
 
-static int is_depth_format(GLenum format) {
-    switch (format) {
-    case GL_DEPTH_COMPONENT:
-    case GL_DEPTH_COMPONENT16:
-    case GL_DEPTH_COMPONENT24:
-    case GL_DEPTH_COMPONENT32F:
-        return 1;
-    default:
-        return 0;
-    }
+// --- glCompressedTexImage3D (native) ---
+void glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height,
+                            GLsizei depth, GLint border, GLsizei imageSize, const void* data) {
+    LOG()
+    LOG_D("glCompressedTexImage3D, target: %s, level: %d, internalformat: %s, width: %d, height: %d, "
+          "depth: %d, border: %d, imageSize: %d",
+          glEnumToString(target), level, glEnumToString(internalformat), width, height, depth, border, imageSize)
+
+    GLES.glCompressedTexImage3D(target, level, internalformat, width, height, depth, border, imageSize, data);
+
+    GET_TEXTURE_OBJECT(target);
+    tex->target = ConvertGLEnumToTextureTarget(target);
+    tex->internal_format = internalformat;
+    tex->width = width;
+    tex->height = height;
+    tex->depth = depth;
+    tex->swizzle_param[0] = GL_RED;
+    tex->swizzle_param[1] = GL_GREEN;
+    tex->swizzle_param[2] = GL_BLUE;
+    tex->swizzle_param[3] = GL_ALPHA;
+
+    CHECK_GL_ERROR
 }
 
-static GLenum get_binding_for_target(GLenum target) {
-    switch (target) {
-    case GL_TEXTURE_2D:
-        return GL_TEXTURE_BINDING_2D;
-    case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
-    case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
-    case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
-    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
-    case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
-    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
-        return GL_TEXTURE_BINDING_CUBE_MAP;
-    default:
-        return 0;
-    }
+// --- glCompressedTexSubImage2D (native) ---
+void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
+                               GLsizei height, GLenum format, GLsizei imageSize, const void* data) {
+    LOG()
+    LOG_D("glCompressedTexSubImage2D, target: %s, level: %d, xoffset: %d, yoffset: %d, "
+          "width: %d, height: %d, format: %s, imageSize: %d",
+          glEnumToString(target), level, xoffset, yoffset, width, height, glEnumToString(format), imageSize)
+
+    GLES.glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, data);
+    CHECK_GL_ERROR
 }
 
+// --- glCompressedTexSubImage3D (native) ---
+void glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                               GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize,
+                               const void* data) {
+    LOG()
+    LOG_D("glCompressedTexSubImage3D, target: %s, level: %d, xoffset: %d, yoffset: %d, zoffset: %d, "
+          "width: %d, height: %d, depth: %d, format: %s, imageSize: %d",
+          glEnumToString(target), level, xoffset, yoffset, zoffset, width, height, depth, glEnumToString(format),
+          imageSize)
+
+    GLES.glCompressedTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize,
+                                   data);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Native copy texture functions (ES 3.2)
+// ============================================================================
+
+// --- glCopyTexImage2D (native) ---
 void glCopyTexImage2D(GLenum target, GLint level, GLenum internalFormat, GLint x, GLint y, GLsizei width,
                       GLsizei height, GLint border) {
     LOG()
@@ -826,6 +960,7 @@ void glCopyTexImage2D(GLenum target, GLint level, GLenum internalFormat, GLint x
     CHECK_GL_ERROR_NO_INIT
 }
 
+// --- glCopyTexSubImage2D (native) ---
 void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width,
                          GLsizei height) {
     LOG()
@@ -867,88 +1002,65 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
     CHECK_GL_ERROR
 }
 
-void glRenderbufferStorage(GLenum target, GLenum internalFormat, GLsizei width, GLsizei height) {
+// --- glCopyTexSubImage3D (native) ---
+void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y,
+                         GLsizei width, GLsizei height) {
     LOG()
+    LOG_D("glCopyTexSubImage3D, target: %s, level: %d, xoffset: %d, yoffset: %d, zoffset: %d, "
+          "x: %d, y: %d, width: %d, height: %d",
+          glEnumToString(target), level, xoffset, yoffset, zoffset, x, y, width, height)
 
-    INIT_CHECK_GL_ERROR_FORCE
-
-    LOG_D("glRenderbufferStorage, target: %s, internalFormat: %s, width: %d, "
-          "height: %d",
-          glEnumToString(target), glEnumToString(internalFormat), width, height)
-
-    GLES.glRenderbufferStorage(target, internalFormat, width, height);
-
-    CHECK_GL_ERROR_NO_INIT
-}
-
-void glRenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalFormat, GLsizei width,
-                                      GLsizei height) {
-    LOG()
-
-    INIT_CHECK_GL_ERROR_FORCE
-
-    LOG_D("glRenderbufferStorageMultisample, target: %d, samples: %d, "
-          "internalFormat: %d, width: %d, height: %d",
-          target, samples, internalFormat, width, height)
-
-    GLES.glRenderbufferStorageMultisample(target, samples, internalFormat, width, height);
-
-    CHECK_GL_ERROR_NO_INIT
-}
-
-void glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat* params) {
-    LOG()
-    LOG_D("glGetTexLevelParameterfv,target: %d, level: %d, pname: %d", target, level, pname)
-    if (gl_state) {
-        GLenum rtarget = map_tex_target(target);
-        if (rtarget == GL_PROXY_TEXTURE_2D) {
-            switch (pname) {
-            case GL_TEXTURE_WIDTH:
-                (*params) = (float)nlevel(gl_state->proxy_width, level);
-                return;
-            case GL_TEXTURE_HEIGHT:
-                (*params) = (float)nlevel(gl_state->proxy_height, level);
-                return;
-            case GL_TEXTURE_INTERNAL_FORMAT:
-                (*params) = (float)gl_state->proxy_intformat;
-                return;
-            default:
-                return;
-            }
-        }
-    }
-    GLES.glGetTexLevelParameterfv(target, level, pname, params);
+    GLES.glCopyTexSubImage3D(target, level, xoffset, yoffset, zoffset, x, y, width, height);
     CHECK_GL_ERROR
 }
 
-void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint* params) {
+// ============================================================================
+// Native mipmap generation (ES 3.2)
+// ============================================================================
+
+// --- glGenerateMipmap (native) ---
+void glGenerateMipmap(GLenum target) {
     LOG()
-    LOG_D("glGetTexLevelParameteriv,target: %s, level: %d, pname: %s", glEnumToString(target), level,
-          glEnumToString(pname))
-    if (gl_state) {
-        GLenum rtarget = map_tex_target(target);
-        if (rtarget == GL_PROXY_TEXTURE_2D) {
-            switch (pname) {
-            case GL_TEXTURE_WIDTH:
-                (*params) = nlevel(gl_state->proxy_width, level);
-                return;
-            case GL_TEXTURE_HEIGHT:
-                (*params) = nlevel(gl_state->proxy_height, level);
-                return;
-            case GL_TEXTURE_INTERNAL_FORMAT:
-                (*params) = (GLint)gl_state->proxy_intformat;
-                return;
-            default:
-                return;
-            }
-        }
-    }
-    LOG_D("es.glGetTexLevelParameteriv,target: %s, level: %d, pname: %s", glEnumToString(target), level,
-          glEnumToString(pname))
-    GLES.glGetTexLevelParameteriv(target, level, pname, params);
+    LOG_D("glGenerateMipmap, target: %s", glEnumToString(target))
+    GLES.glGenerateMipmap(target);
     CHECK_GL_ERROR
 }
 
+// ============================================================================
+// Native texture parameter functions (ES 3.2)
+// ============================================================================
+
+// --- glTexParameterf (native) ---
+void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
+    LOG()
+    pname = pname_convert(pname);
+    LOG_D("glTexParameterf, target: %d, pname: %d, param: %f", target, pname, param)
+
+    if (pname == GL_TEXTURE_LOD_BIAS_QCOM && !g_gles_caps.GL_QCOM_texture_lod_bias) {
+        LOG_D("Does not support GL_QCOM_texture_lod_bias, skipped!")
+        return;
+    }
+
+    GLES.glTexParameterf(target, pname, param);
+    CHECK_GL_ERROR
+}
+
+// --- glTexParameteri (native) ---
+void glTexParameteri(GLenum target, GLenum pname, GLint param) {
+    LOG()
+    pname = pname_convert(pname);
+    LOG_D("glTexParameteri, pname: 0x%x", pname)
+
+    if (pname == GL_TEXTURE_LOD_BIAS_QCOM && !g_gles_caps.GL_QCOM_texture_lod_bias) {
+        LOG_D("Does not support GL_QCOM_texture_lod_bias, skipped!")
+        return;
+    }
+
+    GLES.glTexParameteri(target, pname, param);
+    CHECK_GL_ERROR
+}
+
+// --- glTexParameteriv (native) ---
 void glTexParameteriv(GLenum target, GLenum pname, const GLint* params) {
     LOG()
     LOG_D("glTexParameteriv, target: %s, pname: %s", glEnumToString(target), glEnumToString(pname))
@@ -978,83 +1090,218 @@ void glTexParameteriv(GLenum target, GLenum pname, const GLint* params) {
     CHECK_GL_ERROR
 }
 
-void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height,
-                     GLenum format, GLenum type, const void* pixels) {
+// --- glTexParameterfv (native) ---
+void glTexParameterfv(GLenum target, GLenum pname, const GLfloat* params) {
     LOG()
+    LOG_D("glTexParameterfv, target: %s, pname: %s", glEnumToString(target), glEnumToString(pname))
+    GLES.glTexParameterfv(target, pname, params);
+    CHECK_GL_ERROR
+}
 
-    LOG_D("glTexSubImage2D, target = %s, level = %d, xoffset = %d, yoffset = %d, "
-          "width = %d, height = %d, format = %s, type = %s, pixels = 0x%x",
-          glEnumToString(target), level, xoffset, yoffset, width, height, glEnumToString(format), glEnumToString(type),
-          pixels)
+// ============================================================================
+// Native texture query functions (ES 3.2)
+// ============================================================================
 
-    if (format == GL_BGRA && (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV)) {
-        glTexParameteri(target, GL_TEXTURE_SWIZZLE_R,  GL_BLUE);
-        glTexParameteri(target, GL_TEXTURE_SWIZZLE_B,  GL_RED);
+// --- glGetTexParameteriv (native) ---
+void glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
+    LOG()
+    LOG_D("glGetTexParameteriv, target: %s, pname: %s", glEnumToString(target), glEnumToString(pname))
+    GLES.glGetTexParameteriv(target, pname, params);
+    CHECK_GL_ERROR
+}
 
-        format = GL_RGBA;
-        type = GL_UNSIGNED_BYTE;
+// --- glGetTexParameterfv (native) ---
+void glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) {
+    LOG()
+    LOG_D("glGetTexParameterfv, target: %s, pname: %s", glEnumToString(target), glEnumToString(pname))
+    GLES.glGetTexParameterfv(target, pname, params);
+    CHECK_GL_ERROR
+}
+
+// --- glGetTexLevelParameterfv (native) ---
+void glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat* params) {
+    LOG()
+    LOG_D("glGetTexLevelParameterfv,target: %d, level: %d, pname: %d", target, level, pname)
+    if (gl_state) {
+        GLenum rtarget = map_tex_target(target);
+        if (rtarget == GL_PROXY_TEXTURE_2D) {
+            switch (pname) {
+            case GL_TEXTURE_WIDTH:
+                (*params) = (float)nlevel(gl_state->proxy_width, level);
+                return;
+            case GL_TEXTURE_HEIGHT:
+                (*params) = (float)nlevel(gl_state->proxy_height, level);
+                return;
+            case GL_TEXTURE_INTERNAL_FORMAT:
+                (*params) = (float)gl_state->proxy_intformat;
+                return;
+            default:
+                return;
+            }
+        }
+    }
+    GLES.glGetTexLevelParameterfv(target, level, pname, params);
+    CHECK_GL_ERROR
+}
+
+// --- glGetTexLevelParameteriv (native) ---
+void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint* params) {
+    LOG()
+    LOG_D("glGetTexLevelParameteriv,target: %s, level: %d, pname: %s", glEnumToString(target), level,
+          glEnumToString(pname))
+    if (gl_state) {
+        GLenum rtarget = map_tex_target(target);
+        if (rtarget == GL_PROXY_TEXTURE_2D) {
+            switch (pname) {
+            case GL_TEXTURE_WIDTH:
+                (*params) = nlevel(gl_state->proxy_width, level);
+                return;
+            case GL_TEXTURE_HEIGHT:
+                (*params) = nlevel(gl_state->proxy_height, level);
+                return;
+            case GL_TEXTURE_INTERNAL_FORMAT:
+                (*params) = (GLint)gl_state->proxy_intformat;
+                return;
+            default:
+                return;
+            }
+        }
+    }
+    LOG_D("es.glGetTexLevelParameteriv,target: %s, level: %d, pname: %s", glEnumToString(target), level,
+          glEnumToString(pname))
+    GLES.glGetTexLevelParameteriv(target, level, pname, params);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// CPU-simulated 1D texture functions (ES 3.2 does NOT support 1D textures)
+// ============================================================================
+
+// --- glTexImage1D (CPU simulation: convert to 2D texture with height=1) ---
+void glTexImage1D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLint border, GLenum format,
+                  GLenum type, const GLvoid* pixels) {
+    LOG()
+    LOG_D("glTexImage1D (CPU simulation: 1D→2D), target: %d, level: %d, internalFormat: %d, width: %d, "
+          "border: %d, format: %d, type: %d",
+          target, level, internalFormat, width, border, format, type)
+    internal_convert(reinterpret_cast<GLenum*>(&internalFormat), &type, &format);
+
+    GLenum rtarget = map_tex_target(target);
+    if (rtarget == GL_PROXY_TEXTURE_1D) {
+        int max1 = 4096;
+        GLES.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max1);
+        set_gl_state_proxy_width(((width << level) > max1) ? 0 : width);
+        set_gl_state_proxy_intformat(internalFormat);
+        return;
     }
 
-    GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
+    GET_TEXTURE_OBJECT(target);
+    tex->target = ConvertGLEnumToTextureTarget(target);
+    tex->depth = 1;
+    tex->format = format;
+    tex->internal_format = internalFormat;
+    tex->width = width;
+    tex->height = 1;
+    tex->swizzle_param[0] = GL_RED;
+    tex->swizzle_param[1] = GL_GREEN;
+    tex->swizzle_param[2] = GL_BLUE;
+    tex->swizzle_param[3] = GL_ALPHA;
 
     CHECK_GL_ERROR
 }
 
-void glBindTexture(GLenum target, GLuint texture) {
+// --- glTexSubImage1D (CPU simulation: convert to 2D texture operation) ---
+void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type,
+                     const void* pixels) {
     LOG()
-    LOG_D("glBindTexture(%s, %d)", glEnumToString(target), texture)
-    INIT_CHECK_GL_ERROR
+    LOG_D("glTexSubImage1D (CPU simulation: 1D→2D), target: %s, level: %d, xoffset: %d, "
+          "width: %d, format: %s, type: %s",
+          glEnumToString(target), level, xoffset, width, glEnumToString(format), glEnumToString(type))
 
-    if (hardware && gl_state && hardware->emulate_texture_buffer && target == GL_TEXTURE_BUFFER) {
-        GLES.glActiveTexture(GL_TEXTURE0 + 15);
-        GLES.glBindTexture(GL_TEXTURE_2D, texture);
-        GLES.glActiveTexture(GL_TEXTURE0 + gl_state->current_tex_unit);
-    } else {
-        GLES.glBindTexture(target, texture);
-    }
-    CHECK_GL_ERROR_NO_INIT
-
-    int currentUnitIndex = GetCurrentTextureUnitIndex();
-    auto& currentUnit = GetTextureUnit(currentUnitIndex);
-    auto targetR = ConvertGLEnumToTextureTarget(target);
-    if (targetR == TextureTarget::UNKNWON) {
-        LOG_E("glBindTexture: Unknown texture target: %s", glEnumToString(target));
-        return;
-    }
-    auto& bindingSlot = currentUnit.GetBindingSlot(targetR);
-    auto textureObject = GetOrCreateTextureObject(texture);
-    if (!textureObject) {
-        LOG_W("glBindTexture: Failed to get or create texture object for ID %d, it may be not tracked", texture);
-        return;
-    }
-    bindingSlot.Bind(textureObject);
-    textureObject->target = targetR;
-}
-
-void glDeleteTextures(GLsizei n, const GLuint* textures) {
-    LOG()
-    INIT_CHECK_GL_ERROR
-    GLES.glDeleteTextures(n, textures);
-    CHECK_GL_ERROR_NO_INIT
-
-    for (GLsizei i = 0; i < n; ++i) {
-        MarkTextureObjectForDeletion(textures[i]);
-    }
-}
-
-void glActiveTexture(GLenum texture) {
-    LOG()
-    LOG_D("glActiveTexture, texture = %s", glEnumToString(texture))
-    if (texture < GL_TEXTURE0 || texture >= GL_TEXTURE0 + MAX_TEXTURE_IMAGE_UNITS) {
-        LOG_E("Invalid texture enum: %s", glEnumToString(texture))
-        return;
-    }
-
-    set_gl_state_current_tex_unit(texture - GL_TEXTURE0);
-    GLES.glActiveTexture(texture);
-    ActivateTextureUnit(texture - GL_TEXTURE0);
+    // Simulate 1D sub-image by calling 2D with yoffset=0, height=1
+    GLES.glTexSubImage2D(target, level, xoffset, 0, width, 1, format, type, pixels);
     CHECK_GL_ERROR
 }
+
+// --- glTexStorage1D (CPU simulation: convert to 2D texture with height=1) ---
+void glTexStorage1D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width) {
+    LOG()
+    LOG_D("glTexStorage1D (CPU simulation: 1D→2D), target: %d, levels: %d, internalFormat: %d, width: %d",
+          target, levels, internalFormat, width)
+    internal_convert(&internalFormat, nullptr, nullptr);
+
+    GET_TEXTURE_OBJECT(target);
+    tex->target = ConvertGLEnumToTextureTarget(target);
+    tex->internal_format = internalFormat;
+    tex->width = width;
+    tex->height = 1;
+    tex->depth = 1;
+    tex->swizzle_param[0] = GL_RED;
+    tex->swizzle_param[1] = GL_GREEN;
+    tex->swizzle_param[2] = GL_BLUE;
+    tex->swizzle_param[3] = GL_ALPHA;
+
+    CHECK_GL_ERROR
+}
+
+// --- glCopyTexImage1D (CPU simulation: stub, record metadata only) ---
+void glCopyTexImage1D(GLenum target, GLint level, GLenum internalFormat, GLint x, GLint y, GLsizei width,
+                      GLint border) {
+    LOG()
+    LOG_D("glCopyTexImage1D (CPU simulation: stub), target: %d, level: %d, internalFormat: %d, x: %d, "
+          "y: %d, width: %d, border: %d",
+          target, level, internalFormat, x, y, width, border)
+
+    GET_TEXTURE_OBJECT(target);
+    tex->target = ConvertGLEnumToTextureTarget(target);
+    tex->internal_format = internalFormat;
+    tex->width = width;
+    tex->height = 1;
+    tex->depth = 1;
+    tex->swizzle_param[0] = GL_RED;
+    tex->swizzle_param[1] = GL_GREEN;
+    tex->swizzle_param[2] = GL_BLUE;
+    tex->swizzle_param[3] = GL_ALPHA;
+
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Renderbuffer functions (native)
+// ============================================================================
+
+void glRenderbufferStorage(GLenum target, GLenum internalFormat, GLsizei width, GLsizei height) {
+    LOG()
+
+    INIT_CHECK_GL_ERROR_FORCE
+
+    LOG_D("glRenderbufferStorage, target: %s, internalFormat: %s, width: %d, "
+          "height: %d",
+          glEnumToString(target), glEnumToString(internalFormat), width, height)
+
+    GLES.glRenderbufferStorage(target, internalFormat, width, height);
+
+    CHECK_GL_ERROR_NO_INIT
+}
+
+void glRenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalFormat, GLsizei width,
+                                      GLsizei height) {
+    LOG()
+
+    INIT_CHECK_GL_ERROR_FORCE
+
+    LOG_D("glRenderbufferStorageMultisample, target: %d, samples: %d, "
+          "internalFormat: %d, width: %d, height: %d",
+          target, samples, internalFormat, width, height)
+
+    GLES.glRenderbufferStorageMultisample(target, samples, internalFormat, width, height);
+
+    CHECK_GL_ERROR_NO_INIT
+}
+
+// ============================================================================
+// Other texture functions (keep existing logic)
+// ============================================================================
 
 void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, void* pixels) {
     LOG()
@@ -1166,20 +1413,6 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
     CHECK_GL_ERROR
 }
 
-void glTexParameteri(GLenum target, GLenum pname, GLint param) {
-    LOG()
-    pname = pname_convert(pname);
-    LOG_D("glTexParameteri, pname: 0x%x", pname)
-
-    if (pname == GL_TEXTURE_LOD_BIAS_QCOM && !g_gles_caps.GL_QCOM_texture_lod_bias) {
-        LOG_D("Does not support GL_QCOM_texture_lod_bias, skipped!")
-        return;
-    }
-
-    GLES.glTexParameteri(target, pname, param);
-    CHECK_GL_ERROR
-}
-
 void glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, const void* data) {
     LOG()
     LOG_D("glClearTexImage, texture: %d, level: %d, format: %d, type: %d", texture, level, format, type)
@@ -1251,3 +1484,5 @@ void glPixelStorei(GLenum pname, GLint param) {
     GLES.glPixelStorei(pname, param);
     CHECK_GL_ERROR
 }
+
+// glGenerateTextureMipmap is handled in ExtWrappers/DSAWrapper.cpp (DSA emulation)

@@ -5,6 +5,31 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
+// ============================================================================
+// Texture Module Header (OpenGL ES 3.2)
+//
+// Architecture rule: "ES 3.2 native → native, ES 3.2 not native → CPU simulation"
+//
+// Native (ES 3.2 directly supports):
+//   glTexImage2D, glTexImage3D, glTexSubImage2D, glTexSubImage3D
+//   glTexStorage2D, glTexStorage3D
+//   glCompressedTexImage2D, glCompressedTexImage3D
+//   glCompressedTexSubImage2D, glCompressedTexSubImage3D
+//   glCopyTexImage2D, glCopyTexSubImage2D, glCopyTexSubImage3D
+//   glGenerateMipmap, glGenerateTextureMipmap
+//   glTexParameterf, glTexParameteri, glTexParameteriv, glTexParameterfv
+//   glGetTexParameteriv, glGetTexParameterfv
+//   glGetTexLevelParameteriv, glGetTexLevelParameterfv
+//   glTexBuffer, glTexBufferRange
+//   glBindTexture, glDeleteTextures, glActiveTexture
+//
+// CPU simulation (ES 3.2 does NOT support natively):
+//   glTexImage1D → convert to 2D texture (height=1)
+//   glTexSubImage1D → convert to 2D texture operation
+//   glTexStorage1D → convert to 2D texture (height=1)
+//   glCopyTexImage1D → stub (record metadata only)
+// ============================================================================
+
 #ifndef MOBILEGLUES_TEXTURE_H
 #define MOBILEGLUES_TEXTURE_H
 
@@ -17,39 +42,119 @@ extern "C"
 
 #include <GL/gl.h>
 
-    GLAPI GLAPIENTRY void glTexParameterf(GLenum target, GLenum pname, GLfloat param);
-    GLAPI GLAPIENTRY void glTexImage1D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLint border,
-                                       GLenum format, GLenum type, const GLvoid* pixels);
+    // ============================================================================
+    // Texture binding / management
+    // ============================================================================
+
+    GLAPI GLAPIENTRY void glBindTexture(GLenum target, GLuint texture);
+    GLAPI GLAPIENTRY void glDeleteTextures(GLsizei n, const GLuint* textures);
+    GLAPI GLAPIENTRY void glActiveTexture(GLenum texture);
+
+    // ============================================================================
+    // Native texture image specification (ES 3.2)
+    // ============================================================================
+
     GLAPI GLAPIENTRY void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height,
                                        GLint border, GLenum format, GLenum type, const GLvoid* pixels);
     GLAPI GLAPIENTRY void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height,
                                        GLsizei depth, GLint border, GLenum format, GLenum type, const GLvoid* pixels);
-    GLAPI GLAPIENTRY void glTexStorage1D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width);
+    GLAPI GLAPIENTRY void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
+                                          GLsizei height, GLenum format, GLenum type, const void* pixels);
+    GLAPI GLAPIENTRY void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                          GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
+                                          const void* pixels);
     GLAPI GLAPIENTRY void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width,
                                          GLsizei height);
     GLAPI GLAPIENTRY void glTexStorage3D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width,
                                          GLsizei height, GLsizei depth);
-    GLAPI GLAPIENTRY void glCopyTexImage1D(GLenum target, GLint level, GLenum internalFormat, GLint x, GLint y,
-                                           GLsizei width, GLint border);
+
+    // ============================================================================
+    // Native compressed texture functions (ES 3.2)
+    // ============================================================================
+
+    GLAPI GLAPIENTRY void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                                                 GLsizei height, GLint border, GLsizei imageSize, const void* data);
+    GLAPI GLAPIENTRY void glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                                                 GLsizei height, GLsizei depth, GLint border, GLsizei imageSize,
+                                                 const void* data);
+    GLAPI GLAPIENTRY void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                                                    GLsizei width, GLsizei height, GLenum format, GLsizei imageSize,
+                                                    const void* data);
+    GLAPI GLAPIENTRY void glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                                                    GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                                                    GLenum format, GLsizei imageSize, const void* data);
+
+    // ============================================================================
+    // Native copy texture functions (ES 3.2)
+    // ============================================================================
+
     GLAPI GLAPIENTRY void glCopyTexImage2D(GLenum target, GLint level, GLenum internalFormat, GLint x, GLint y,
                                            GLsizei width, GLsizei height, GLint border);
     GLAPI GLAPIENTRY void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x,
                                               GLint y, GLsizei width, GLsizei height);
+    GLAPI GLAPIENTRY void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                              GLint x, GLint y, GLsizei width, GLsizei height);
+
+    // ============================================================================
+    // Native mipmap generation (ES 3.2)
+    // ============================================================================
+
+    GLAPI GLAPIENTRY void glGenerateMipmap(GLenum target);
+    GLAPI GLAPIENTRY void glGenerateTextureMipmap(GLuint texture);
+
+    // ============================================================================
+    // Native texture parameter functions (ES 3.2)
+    // ============================================================================
+
+    GLAPI GLAPIENTRY void glTexParameterf(GLenum target, GLenum pname, GLfloat param);
+    GLAPI GLAPIENTRY void glTexParameteri(GLenum target, GLenum pname, GLint param);
+    GLAPI GLAPIENTRY void glTexParameteriv(GLenum target, GLenum pname, const GLint* params);
+    GLAPI GLAPIENTRY void glTexParameterfv(GLenum target, GLenum pname, const GLfloat* params);
+
+    // ============================================================================
+    // Native texture query functions (ES 3.2)
+    // ============================================================================
+
+    GLAPI GLAPIENTRY void glGetTexParameteriv(GLenum target, GLenum pname, GLint* params);
+    GLAPI GLAPIENTRY void glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params);
+    GLAPI GLAPIENTRY void glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat* params);
+    GLAPI GLAPIENTRY void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint* params);
+
+    // ============================================================================
+    // Native texture buffer functions (ES 3.2)
+    // ============================================================================
+
+    GLAPI GLAPIENTRY void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer);
+    GLAPI GLAPIENTRY void glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset,
+                                           GLsizeiptr size);
+
+    // ============================================================================
+    // CPU-simulated 1D texture functions (ES 3.2 does NOT support 1D textures)
+    // ============================================================================
+
+    GLAPI GLAPIENTRY void glTexImage1D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLint border,
+                                       GLenum format, GLenum type, const GLvoid* pixels);
+    GLAPI GLAPIENTRY void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format,
+                                          GLenum type, const void* pixels);
+    GLAPI GLAPIENTRY void glTexStorage1D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width);
+    GLAPI GLAPIENTRY void glCopyTexImage1D(GLenum target, GLint level, GLenum internalFormat, GLint x, GLint y,
+                                           GLsizei width, GLint border);
+
+    // ============================================================================
+    // Renderbuffer functions (native)
+    // ============================================================================
+
     GLAPI GLAPIENTRY void glRenderbufferStorage(GLenum target, GLenum internalFormat, GLsizei width, GLsizei height);
     GLAPI GLAPIENTRY void glRenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalFormat,
                                                            GLsizei width, GLsizei height);
-    GLAPI GLAPIENTRY void glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat* params);
-    GLAPI GLAPIENTRY void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint* params);
-    GLAPI GLAPIENTRY void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
-                                          GLsizei height, GLenum format, GLenum type, const void* pixels);
-    GLAPI GLAPIENTRY void glTexParameteriv(GLenum target, GLenum pname, const GLint* params);
-    GLAPI GLAPIENTRY void glGenerateTextureMipmap(GLuint texture);
-    GLAPI GLAPIENTRY void glBindTexture(GLenum target, GLuint texture);
-    GLAPI GLAPIENTRY void glDeleteTextures(GLsizei n, const GLuint* textures);
+
+    // ============================================================================
+    // Other functions (keep existing logic)
+    // ============================================================================
+
     GLAPI GLAPIENTRY void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, void* pixels);
     GLAPI GLAPIENTRY void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type,
                                        void* pixels);
-    GLAPI GLAPIENTRY void glTexParameteri(GLenum target, GLenum pname, GLint param);
     GLAPI GLAPIENTRY void glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, const void* data);
     GLAPI GLAPIENTRY void glPixelStorei(GLenum pname, GLint param);
 

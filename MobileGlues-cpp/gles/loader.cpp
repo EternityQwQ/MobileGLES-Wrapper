@@ -5,6 +5,19 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
+// ============================================================================
+// GLES 3.2 Loader - ES 3.2-Only Architecture
+//
+// This file targets OpenGL ES 3.2 exclusively. All ES 3.2 core features
+// (compute shaders, geometry/tessellation shaders, multisample textures,
+//  texture buffer, debug output, etc.) are always available — no capability
+//  checks are needed for them.
+//
+// Only optional extensions beyond ES 3.2 core (e.g. EXT_buffer_storage,
+//  EXT_disjoint_timer_query, EXT_multi_draw_indirect, OES_mapbuffer)
+//  are detected at runtime and stored in g_gles_caps.
+// ============================================================================
+
 #include <cstring>
 #include <cstdio>
 #include "loader.h"
@@ -27,6 +40,10 @@ void *gles = nullptr, *egl = nullptr;
 
 struct gles_func_t g_gles_func;
 
+// ---------------------------------------------------------------------------
+// Library search paths
+// ---------------------------------------------------------------------------
+
 static const char* path_prefix[] = {
     "", "/opt/vc/lib/", "/usr/local/lib/", "/usr/lib/", nullptr,
 };
@@ -48,6 +65,10 @@ static const char* egl_lib[] = {
 
 const char* GLES_ANGLE = "libGLESv2_angle.so";
 const char* EGL_ANGLE = "libEGL_angle.so";
+
+// ---------------------------------------------------------------------------
+// Dynamic library loading
+// ---------------------------------------------------------------------------
 
 void* open_lib(const char** names, const char* override) {
     void* lib = nullptr;
@@ -87,10 +108,15 @@ void* proc_address(void* lib, const char* name) {
     return dlsym(lib, name);
 }
 
+// ---------------------------------------------------------------------------
+// Hardware & GL State Setup (ES 3.2 target)
+// ---------------------------------------------------------------------------
+
 void set_hardware() {
+    // ES 3.2-only: always set version to 320 — no per-version branching needed.
     hardware = new hardware_s;
-    set_es_version();
-    hardware->emulate_texture_buffer = false;
+    hardware->es_version = 320;
+    hardware->emulate_texture_buffer = false;  // ES 3.2 natively supports glTexBuffer
 }
 
 void init_gl_state() {
@@ -104,6 +130,10 @@ void init_gl_state() {
     InitVertexArrayMap(512);
     InitFramebufferMap(512);
 }
+
+// ---------------------------------------------------------------------------
+// Extension logging
+// ---------------------------------------------------------------------------
 
 void LogOpenGLExtensions() {
     const GLubyte* raw_extensions = glGetString(GL_EXTENSIONS);
@@ -121,15 +151,33 @@ void LogOpenGLExtensions() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Capability Detection (ES 3.2 core assumed, optional extensions only)
+// ---------------------------------------------------------------------------
+
 struct gles_caps_t g_gles_caps;
 
 void InitGLESCapabilities() {
     memset(&g_gles_caps, 0, sizeof(struct gles_caps_t));
 
+    // Initialize the base GL extension list (GL_ARB_*, GL_KHR_*, etc.)
+    // These are the extensions we report to the desktop GL layer.
     InitGLESBaseExtensions();
 
     GLES.glGetIntegerv(GL_MAJOR_VERSION, &g_gles_caps.major);
     GLES.glGetIntegerv(GL_MINOR_VERSION, &g_gles_caps.minor);
+
+    // ES 3.2 core features are always available — no runtime checks needed for:
+    //   - compute shaders (glDispatchCompute, etc.)
+    //   - geometry/tessellation shaders
+    //   - multisample/multisample array textures
+    //   - texture buffer objects (glTexBuffer, glTexBufferRange)
+    //   - debug output (glDebugMessageCallback, etc.)
+    //   - per-blend-draw-buffer (glBlendFuncSeparatei, etc.)
+    //   - robust buffer access (glGetGraphicsResetStatus, etc.)
+    //   - depth_texture, depth24, texture_rg, texture_norm16, etc.
+    //
+    // We only detect optional extensions that are NOT part of ES 3.2 core.
 
     GLint num_es_extensions = 0;
     GLES.glGetIntegerv(GL_NUM_EXTENSIONS, &num_es_extensions);
@@ -138,34 +186,15 @@ void InitGLESCapabilities() {
         const char* extension = (const char*)GLES.glGetStringi(GL_EXTENSIONS, i);
         if (extension) {
             LOG_D("%s", (const char*)extension)
+            // ---- Optional extensions beyond ES 3.2 core ----
             if (strcmp(extension, "GL_EXT_buffer_storage") == 0) {
                 g_gles_caps.GL_EXT_buffer_storage = 1;
             } else if (strcmp(extension, "GL_EXT_disjoint_timer_query") == 0) {
                 g_gles_caps.GL_EXT_disjoint_timer_query = 1;
-            } else if (strcmp(extension, "GL_QCOM_texture_lod_bias") == 0) {
-                g_gles_caps.GL_QCOM_texture_lod_bias = 1;
-            } else if (strcmp(extension, "GL_EXT_blend_func_extended") == 0) {
-                g_gles_caps.GL_EXT_blend_func_extended = 1;
-            } else if (strcmp(extension, "GL_EXT_texture_format_BGRA8888") == 0) {
-                g_gles_caps.GL_EXT_texture_format_BGRA8888 = 1;
-            } else if (strcmp(extension, "GL_EXT_read_format_bgra") == 0) {
-                g_gles_caps.GL_EXT_read_format_bgra = 1;
             } else if (strcmp(extension, "GL_OES_mapbuffer") == 0) {
                 g_gles_caps.GL_OES_mapbuffer = 1;
             } else if (strcmp(extension, "GL_EXT_multi_draw_indirect") == 0) {
                 g_gles_caps.GL_EXT_multi_draw_indirect = 1;
-            } else if (strcmp(extension, "GL_OES_depth_texture") == 0) {
-                g_gles_caps.GL_OES_depth_texture = 1;
-            } else if (strcmp(extension, "GL_OES_depth24") == 0) {
-                g_gles_caps.GL_OES_depth24 = 1;
-            } else if (strcmp(extension, "GL_OES_depth_texture_float") == 0) {
-                g_gles_caps.GL_OES_depth_texture_float = 1;
-            } else if (strcmp(extension, "GL_EXT_texture_norm16") == 0) {
-                g_gles_caps.GL_EXT_texture_norm16 = 1;
-            } else if (strcmp(extension, "GL_EXT_texture_rg") == 0) {
-                g_gles_caps.GL_EXT_texture_rg = 1;
-            } else if (strcmp(extension, "GL_EXT_texture_query_lod") == 0) {
-                g_gles_caps.GL_EXT_texture_query_lod = 1;
             }
         } else {
             LOG_D("(nullptr)")
@@ -173,6 +202,8 @@ void InitGLESCapabilities() {
     }
 
     LOG_I("%sDetected GL_EXT_multi_draw_indirect!", g_gles_caps.GL_EXT_multi_draw_indirect ? "" : "Not ")
+
+    // ---- Map optional ES extensions to desktop GL extensions ----
 
     if (g_gles_caps.GL_EXT_buffer_storage) {
         AppendExtension("GL_ARB_buffer_storage");
@@ -184,6 +215,7 @@ void InitGLESCapabilities() {
     }
 
     if (global_settings.ext_compute_shader) {
+        // Compute shaders are core in ES 3.2 — always advertise them.
         AppendExtension("GL_ARB_compute_shader");
     }
 
@@ -192,6 +224,7 @@ void InitGLESCapabilities() {
         AppendExtension("GL_EXT_direct_state_access");
     }
 
+    // Append OpenGL version strings for the range 32..GLVersion
     int glVersion = GLVersion.toInt(2);
     for (int ver = 32; ver <= glVersion; ++ver) {
         if (ver > 33 && ver < 40) continue;
@@ -199,15 +232,23 @@ void InitGLESCapabilities() {
         AppendExtension(("OpenGL" + std::to_string(ver)).c_str());
     }
 
+    // ES 3.2 includes vertex attrib binding as core — always advertise it.
     if (g_gles_caps.major > 3 || (g_gles_caps.major == 3 && g_gles_caps.minor >= 1)) {
         AppendExtension("GL_ARB_vertex_attrib_binding");
     }
 }
 
+// ---------------------------------------------------------------------------
+// ES 3.2 Function Pointer Initialization
+// All ES 3.2 core entry points are loaded here at startup.
+// ---------------------------------------------------------------------------
+
 void init_target_gles() {
     init_gl_state();
 
     memset(&g_gles_func, 0, sizeof(g_gles_func));
+
+    // ---- ES 2.0 core functions ----
     INIT_GLES_FUNC(glActiveTexture)
     INIT_GLES_FUNC(glAttachShader)
     INIT_GLES_FUNC(glBindAttribLocation)
@@ -231,7 +272,6 @@ void init_target_gles() {
     INIT_GLES_FUNC(glCompileShader)
     INIT_GLES_FUNC(glCompressedTexImage2D)
     INIT_GLES_FUNC(glCompressedTexSubImage2D)
-    //    INIT_GLES_FUNC(glCopyTexImage1D)
     INIT_GLES_FUNC(glCopyTexImage2D)
     INIT_GLES_FUNC(glCopyTexSubImage2D)
     INIT_GLES_FUNC(glCreateProgram)
@@ -315,9 +355,7 @@ void init_target_gles() {
     INIT_GLES_FUNC(glStencilMaskSeparate)
     INIT_GLES_FUNC(glStencilOp)
     INIT_GLES_FUNC(glStencilOpSeparate)
-    //    INIT_GLES_FUNC(glTexImage1D)
     INIT_GLES_FUNC(glTexImage2D)
-    //    INIT_GLES_FUNC(glTexStorage1D)
     INIT_GLES_FUNC(glTexParameterf)
     INIT_GLES_FUNC(glTexParameterfv)
     INIT_GLES_FUNC(glTexParameteri)
@@ -354,6 +392,8 @@ void init_target_gles() {
     INIT_GLES_FUNC(glVertexAttrib4fv)
     INIT_GLES_FUNC(glVertexAttribPointer)
     INIT_GLES_FUNC(glViewport)
+
+    // ---- ES 3.0 core functions ----
     INIT_GLES_FUNC(glReadBuffer)
     INIT_GLES_FUNC(glDrawRangeElements)
     INIT_GLES_FUNC(glTexImage3D)
@@ -456,6 +496,8 @@ void init_target_gles() {
     INIT_GLES_FUNC(glTexStorage2D)
     INIT_GLES_FUNC(glTexStorage3D)
     INIT_GLES_FUNC(glGetInternalformativ)
+
+    // ---- ES 3.1 core functions (compute shaders, indirect draw, SSBO) ----
     INIT_GLES_FUNC(glDispatchCompute)
     INIT_GLES_FUNC(glDispatchComputeIndirect)
     INIT_GLES_FUNC(glDrawArraysIndirect)
@@ -526,6 +568,8 @@ void init_target_gles() {
     INIT_GLES_FUNC(glVertexBindingDivisor)
     INIT_GLES_FUNC(glBlendBarrier)
     INIT_GLES_FUNC(glCopyImageSubData)
+
+    // ---- ES 3.2 core functions (debug, geometry/tess, multisample, etc.) ----
     INIT_GLES_FUNC(glDebugMessageControl)
     INIT_GLES_FUNC(glDebugMessageInsert)
     INIT_GLES_FUNC(glDebugMessageCallback)
@@ -569,6 +613,8 @@ void init_target_gles() {
     INIT_GLES_FUNC(glTexBufferRange)
     INIT_GLES_FUNC(glTexStorage3DMultisample)
     INIT_GLES_FUNC(glMapBufferRange)
+
+    // ---- Optional extension functions (may not be present on all ES 3.2 drivers) ----
     INIT_GLES_FUNC(glBufferStorageEXT)
     INIT_GLES_FUNC(glGetQueryObjectivEXT)
     INIT_GLES_FUNC(glGetQueryObjecti64vEXT)
@@ -578,14 +624,12 @@ void init_target_gles() {
     INIT_GLES_FUNC(glMultiDrawArraysIndirectEXT)
     INIT_GLES_FUNC(glMultiDrawElementsIndirectEXT)
     INIT_GLES_FUNC(glMultiDrawElementsBaseVertexEXT)
-    //    INIT_GLES_FUNC(glBruh)
 
     LOG_D("glMultiDrawArraysIndirectEXT() @ 0x%x", GLES.glMultiDrawArraysIndirectEXT)
     LOG_D("glMultiDrawElementsIndirectEXT() @ 0x%x", GLES.glMultiDrawElementsIndirectEXT)
     LOG_D("glMultiDrawElementsBaseVertexEXT() @ 0x%x", GLES.glMultiDrawElementsBaseVertexEXT)
 
-    //    LOG_D("glBruh() @ 0x%x", GLES.glBruh)
-
+    // ---- Hardware & capability initialization ----
     LOG_D("Initializing %s @ hardware", RENDERERNAME)
     set_hardware();
 

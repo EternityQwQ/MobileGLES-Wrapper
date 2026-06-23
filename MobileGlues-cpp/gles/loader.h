@@ -138,6 +138,22 @@ extern "C"
     LOG_W("Stub function: %s @ %s(...)", RENDERERNAME, __FUNCTION__);                                                  \
     }
 
+// ============================================================================
+// CPU Simulation macros for functions not natively supported by OpenGL ES 3.2
+// ============================================================================
+#define CPU_SIM_FUNCTION_HEAD(type, name, ...)                                                                         \
+    extern "C" GLAPI GLAPIENTRY type name(__VA_ARGS__) {                                                               \
+        LOG()
+
+#define CPU_SIM_FUNCTION_END(type, name, ...)                                                                          \
+    LOG_D("CPU simulation: %s @ %s(...)", RENDERERNAME, __FUNCTION__);                                                 \
+    return (type)1;                                                                                                    \
+    }
+
+#define CPU_SIM_FUNCTION_END_NO_RETURN(type, name, ...)                                                                \
+    LOG_D("CPU simulation: %s @ %s(...)", RENDERERNAME, __FUNCTION__);                                                 \
+    }
+
     struct gles_caps_t {
         int major;
         int minor;

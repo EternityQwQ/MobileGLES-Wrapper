@@ -4,6 +4,29 @@
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
+//
+// Architecture: "ES 3.2 native → native, ES 3.2 not native → CPU simulation"
+//
+// glMultiDrawElements is NOT part of the ES 3.2 core specification.
+// It is a desktop OpenGL function that must be simulated on ES 3.2 backends.
+// This file implements five CPU simulation strategies, selectable at runtime
+// via global_settings.multidraw_mode.
+//
+// Available strategies (multidraw_mode):
+//   DrawElements        — Loop over draws, call glDrawElements per draw.
+//                         Works on ALL ES 3.2 devices. Fallback strategy.
+//   PreferIndirect      — Pack draw commands into an indirect buffer, then
+//                         call glDrawElementsIndirect per draw.
+//                         Requires ES 3.1 (glDrawElementsIndirect).
+//   PreferMultidrawIndirect — Pack draw commands into an indirect buffer,
+//                             then call glMultiDrawElementsIndirectEXT once.
+//                             Requires EXT_multi_draw_indirect.
+//   PreferBaseVertex    — Loop over draws, call glDrawElementsBaseVertex.
+//                         Requires ES 3.2 (glDrawElementsBaseVertex).
+//   Compute             — Use a compute shader to merge all index buffers into
+//                         one contiguous output, then draw once.
+//                         Requires ES 3.1 compute shaders. Falls back to
+//                         DrawElements for strip-like primitive modes.
 
 #include "multidraw.h"
 #include "../config/settings.h"
@@ -12,6 +35,18 @@
 #include <vector>
 
 #define DEBUG 0
+
+// =============================================================================
+// Section: Forward Declarations
+// =============================================================================
+
+static bool is_strip_like_mode(GLenum mode);
+
+// =============================================================================
+// Section: Strategy Dispatch — glMultiDrawElements
+//   Selects a CPU simulation strategy based on global_settings.multidraw_mode.
+//   glMultiDrawElements is NOT in ES 3.2 core; all paths are CPU simulation.
+// =============================================================================
 
 typedef void (*glMultiDrawElements_t)(GLenum, const GLsizei*, GLenum, const void* const*, GLsizei);
 
@@ -44,9 +79,16 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type, const v
     func_ptr(mode, count, type, indices, primcount);
 }
 
-typedef void (*glMultiDrawElementsBaseVertex_t)(GLenum, GLsizei*, GLenum, const void* const*, GLsizei, const GLint*);
+// =============================================================================
+// Section: Strategy Dispatch — glMultiDrawElementsBaseVertex
+//   Same as above but with basevertex parameter.
+//   glMultiDrawElementsBaseVertex is NOT in ES 3.2 core; all paths are CPU
+//   simulation.
+// =============================================================================
 
-void glMultiDrawElementsBaseVertex(GLenum mode, GLsizei* counts, GLenum type, const void* const* indices,
+typedef void (*glMultiDrawElementsBaseVertex_t)(GLenum, const GLsizei*, GLenum, const void* const*, GLsizei, const GLint*);
+
+void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* counts, GLenum type, const void* const* indices,
                                    GLsizei primcount, const GLint* basevertex) {
     static glMultiDrawElementsBaseVertex_t func_ptr = nullptr;
 
@@ -76,6 +118,12 @@ void glMultiDrawElementsBaseVertex(GLenum mode, GLsizei* counts, GLenum type, co
     func_ptr(mode, counts, type, indices, primcount, basevertex);
 }
 
+// =============================================================================
+// Section: Indirect Buffer Management
+//   Manages a reusable GL_DRAW_INDIRECT_BUFFER for indirect / multi-indirect
+//   strategies. Grows by 2x when primcount exceeds the current capacity.
+// =============================================================================
+
 static bool g_indirect_cmds_inited = false;
 static GLsizei g_cmdbufsize = 0;
 static GLuint g_indirectbuffer = 0;
@@ -84,15 +132,16 @@ static GLuint prevIndirectBuffer = 0;
 void prepare_indirect_buffer(const GLsizei* counts, GLenum type, const void* const* indices, GLsizei primcount,
                              const GLint* basevertex) {
     GLES.glGetIntegerv(GL_DRAW_INDIRECT_BUFFER_BINDING, (GLint*)&prevIndirectBuffer);
+
     if (!g_indirect_cmds_inited) {
         GLES.glGenBuffers(1, &g_indirectbuffer);
         GLES.glBindBuffer(GL_DRAW_INDIRECT_BUFFER, g_indirectbuffer);
         g_cmdbufsize = 1;
         GLES.glBufferData(GL_DRAW_INDIRECT_BUFFER, g_cmdbufsize * sizeof(draw_elements_indirect_command_t), NULL,
                           GL_DYNAMIC_DRAW);
-
         g_indirect_cmds_inited = true;
     }
+
     GLES.glBindBuffer(GL_DRAW_INDIRECT_BUFFER, g_indirectbuffer);
 
     if (g_cmdbufsize < primcount) {
@@ -142,12 +191,37 @@ void prepare_indirect_buffer(const GLsizei* counts, GLenum type, const void* con
     GLES.glUnmapBuffer(GL_DRAW_INDIRECT_BUFFER);
 }
 
-void mg_glMultiDrawElementsBaseVertex_drawelements(GLenum mode, GLsizei* counts, GLenum type,
+// =============================================================================
+// Section: Strategy — DrawElements
+//   CPU simulation via per-draw glDrawElements calls.
+//   Works on ALL ES 3.2 devices. Slowest but most compatible.
+//   For basevertex variant: creates a temp index buffer with basevertex offset
+//   applied to each index.
+// =============================================================================
+
+void mg_glMultiDrawElements_drawelements(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices,
+                                         GLsizei primcount) {
+    LOG()
+    void prepareForDraw();
+    prepareForDraw();
+
+    for (GLsizei i = 0; i < primcount; ++i) {
+        const GLsizei c = count[i];
+        if (c > 0) {
+            GLES.glDrawElements(mode, c, type, indices[i]);
+        }
+    }
+
+    CHECK_GL_ERROR
+}
+
+void mg_glMultiDrawElementsBaseVertex_drawelements(GLenum mode, const GLsizei* counts, GLenum type,
                                                    const void* const* indices, GLsizei primcount,
                                                    const GLint* basevertex) {
     LOG()
     void prepareForDraw();
     prepareForDraw();
+
     GLint prevElementBuffer;
     GLES.glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &prevElementBuffer);
 
@@ -188,7 +262,6 @@ void mg_glMultiDrawElementsBaseVertex_drawelements(GLenum mode, GLsizei* counts,
             GLES.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, prevElementBuffer);
             srcData = GLES.glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)currentIndices, currentCount * indexSize,
                                             GL_MAP_READ_BIT);
-
             if (!srcData) {
                 free(tempIndices);
                 GLES.glDeleteBuffers(1, &tempBuffer);
@@ -233,59 +306,12 @@ void mg_glMultiDrawElementsBaseVertex_drawelements(GLenum mode, GLsizei* counts,
     CHECK_GL_ERROR
 }
 
-void mg_glMultiDrawElementsBaseVertex_indirect(GLenum mode, GLsizei* counts, GLenum type, const void* const* indices,
-                                               GLsizei primcount, const GLint* basevertex) {
-    LOG()
-    void prepareForDraw();
-    prepareForDraw();
-
-    prepare_indirect_buffer(counts, type, indices, primcount, basevertex);
-
-    // Draw indirect!
-    for (GLsizei i = 0; i < primcount; ++i) {
-        const GLvoid* offset = reinterpret_cast<GLvoid*>(i * sizeof(draw_elements_indirect_command_t));
-        GLES.glDrawElementsIndirect(mode, type, offset);
-    }
-
-    GLES.glBindBuffer(GL_DRAW_INDIRECT_BUFFER, prevIndirectBuffer);
-
-    CHECK_GL_ERROR
-}
-
-void mg_glMultiDrawElementsBaseVertex_multiindirect(GLenum mode, GLsizei* counts, GLenum type,
-                                                    const void* const* indices, GLsizei primcount,
-                                                    const GLint* basevertex) {
-    LOG()
-    void prepareForDraw();
-    prepareForDraw();
-
-    prepare_indirect_buffer(counts, type, indices, primcount, basevertex);
-
-    // Multi-draw indirect!
-    GLES.glMultiDrawElementsIndirectEXT(mode, type, 0, primcount, 0);
-
-    GLES.glBindBuffer(GL_DRAW_INDIRECT_BUFFER, prevIndirectBuffer);
-
-    CHECK_GL_ERROR
-}
-
-void mg_glMultiDrawElementsBaseVertex_basevertex(GLenum mode, GLsizei* counts, GLenum type, const void* const* indices,
-                                                 GLsizei primcount, const GLint* basevertex) {
-    LOG()
-    void prepareForDraw();
-    prepareForDraw();
-
-    for (GLsizei i = 0; i < primcount; ++i) {
-        const GLsizei count = counts[i];
-        if (count > 0) {
-            LOG_D("GLES.glDrawElementsBaseVertex, mode = %s, count = %d, type = %s, indices[i] = 0x%x, basevertex[i] = "
-                  "%d",
-                  glEnumToString(mode), count, glEnumToString(type), indices[i], basevertex[i])
-            GLES.glDrawElementsBaseVertex(mode, count, type, indices[i], basevertex[i]);
-        }
-    }
-    CHECK_GL_ERROR
-}
+// =============================================================================
+// Section: Strategy — Indirect
+//   CPU simulation: pack draw commands into an indirect buffer, then call
+//   glDrawElementsIndirect once per draw.
+//   Requires ES 3.1 (glDrawElementsIndirect).
+// =============================================================================
 
 void mg_glMultiDrawElements_indirect(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices,
                                      GLsizei primcount) {
@@ -294,7 +320,7 @@ void mg_glMultiDrawElements_indirect(GLenum mode, const GLsizei* count, GLenum t
     prepareForDraw();
 
     prepare_indirect_buffer(count, type, indices, primcount, 0);
-    // Draw indirect!
+
     for (GLsizei i = 0; i < primcount; ++i) {
         const GLvoid* offset = reinterpret_cast<GLvoid*>(i * sizeof(draw_elements_indirect_command_t));
         GLES.glDrawElementsIndirect(mode, type, offset);
@@ -304,37 +330,29 @@ void mg_glMultiDrawElements_indirect(GLenum mode, const GLsizei* count, GLenum t
     CHECK_GL_ERROR
 }
 
-void mg_glMultiDrawElements_drawelements(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices,
-                                         GLsizei primcount) {
+void mg_glMultiDrawElementsBaseVertex_indirect(GLenum mode, const GLsizei* counts, GLenum type, const void* const* indices,
+                                               GLsizei primcount, const GLint* basevertex) {
     LOG()
     void prepareForDraw();
     prepareForDraw();
 
+    prepare_indirect_buffer(counts, type, indices, primcount, basevertex);
+
     for (GLsizei i = 0; i < primcount; ++i) {
-        const GLsizei c = count[i];
-        if (c > 0) {
-            GLES.glDrawElements(mode, c, type, indices[i]);
-        }
+        const GLvoid* offset = reinterpret_cast<GLvoid*>(i * sizeof(draw_elements_indirect_command_t));
+        GLES.glDrawElementsIndirect(mode, type, offset);
     }
 
+    GLES.glBindBuffer(GL_DRAW_INDIRECT_BUFFER, prevIndirectBuffer);
     CHECK_GL_ERROR
 }
 
-void mg_glMultiDrawElements_compute(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices,
-                                    GLsizei primcount) {
-    LOG()
-    void prepareForDraw();
-    prepareForDraw();
-
-    for (GLsizei i = 0; i < primcount; ++i) {
-        const GLsizei c = count[i];
-        if (c > 0) {
-            GLES.glDrawElements(mode, c, type, indices[i]);
-        }
-    }
-
-    CHECK_GL_ERROR
-}
+// =============================================================================
+// Section: Strategy — Multi-Indirect
+//   CPU simulation: pack draw commands into an indirect buffer, then call
+//   glMultiDrawElementsIndirectEXT once.
+//   Requires EXT_multi_draw_indirect.
+// =============================================================================
 
 void mg_glMultiDrawElements_multiindirect(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices,
                                           GLsizei primcount) {
@@ -344,13 +362,32 @@ void mg_glMultiDrawElements_multiindirect(GLenum mode, const GLsizei* count, GLe
 
     prepare_indirect_buffer(count, type, indices, primcount, 0);
 
-    // Multi-draw indirect!
     GLES.glMultiDrawElementsIndirectEXT(mode, type, 0, primcount, 0);
 
     GLES.glBindBuffer(GL_DRAW_INDIRECT_BUFFER, prevIndirectBuffer);
-
     CHECK_GL_ERROR
 }
+
+void mg_glMultiDrawElementsBaseVertex_multiindirect(GLenum mode, const GLsizei* counts, GLenum type,
+                                                    const void* const* indices, GLsizei primcount,
+                                                    const GLint* basevertex) {
+    LOG()
+    void prepareForDraw();
+    prepareForDraw();
+
+    prepare_indirect_buffer(counts, type, indices, primcount, basevertex);
+
+    GLES.glMultiDrawElementsIndirectEXT(mode, type, 0, primcount, 0);
+
+    GLES.glBindBuffer(GL_DRAW_INDIRECT_BUFFER, prevIndirectBuffer);
+    CHECK_GL_ERROR
+}
+
+// =============================================================================
+// Section: Strategy — BaseVertex
+//   CPU simulation: loop over draws, call glDrawElementsBaseVertex per draw.
+//   Requires ES 3.2 (glDrawElementsBaseVertex).
+// =============================================================================
 
 void mg_glMultiDrawElements_basevertex(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices,
                                        GLsizei primcount) {
@@ -368,6 +405,49 @@ void mg_glMultiDrawElements_basevertex(GLenum mode, const GLsizei* count, GLenum
     CHECK_GL_ERROR
 }
 
+void mg_glMultiDrawElementsBaseVertex_basevertex(GLenum mode, const GLsizei* counts, GLenum type, const void* const* indices,
+                                                 GLsizei primcount, const GLint* basevertex) {
+    LOG()
+    void prepareForDraw();
+    prepareForDraw();
+
+    for (GLsizei i = 0; i < primcount; ++i) {
+        const GLsizei count = counts[i];
+        if (count > 0) {
+            LOG_D("GLES.glDrawElementsBaseVertex, mode = %s, count = %d, type = %s, indices[i] = 0x%x, basevertex[i] = "
+                  "%d",
+                  glEnumToString(mode), count, glEnumToString(type), indices[i], basevertex[i])
+            GLES.glDrawElementsBaseVertex(mode, count, type, indices[i], basevertex[i]);
+        }
+    }
+    CHECK_GL_ERROR
+}
+
+// =============================================================================
+// Section: Strategy — Compute (without basevertex)
+//   Simple fallback: loop over draws, call glDrawElements per draw.
+// =============================================================================
+
+void mg_glMultiDrawElements_compute(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices,
+                                    GLsizei primcount) {
+    LOG()
+    void prepareForDraw();
+    prepareForDraw();
+
+    for (GLsizei i = 0; i < primcount; ++i) {
+        const GLsizei c = count[i];
+        if (c > 0) {
+            GLES.glDrawElements(mode, c, type, indices[i]);
+        }
+    }
+
+    CHECK_GL_ERROR
+}
+
+// =============================================================================
+// Section: Primitive Mode Helper
+// =============================================================================
+
 static bool is_strip_like_mode(GLenum mode) {
     switch (mode) {
     case GL_LINE_STRIP:
@@ -381,6 +461,16 @@ static bool is_strip_like_mode(GLenum mode) {
         return false;
     }
 }
+
+// =============================================================================
+// Section: Compute Shader Pipeline
+//   CPU simulation via compute shader: merges all index buffers into one
+//   contiguous output buffer, then draws once with glDrawElements.
+//   Requires ES 3.1 compute shaders.
+//   Falls back to DrawElements strategy for strip-like primitive modes
+//   (GL_LINE_STRIP, GL_TRIANGLE_STRIP, etc.) because merging strips would
+//   break restart indices.
+// =============================================================================
 
 const std::string multidraw_comp_shader =
     R"(#version 310 es
@@ -425,9 +515,9 @@ void main() {
     while (low < high) {
         int mid = low + (high - low) / 2;
         if (prefixSums[mid] > outIdx) {
-            high = mid; // next [low, mid)
+            high = mid;
         } else {
-            low = mid + 1; // next [mid + 1, high)
+            low = mid + 1;
         }
     }
 
@@ -440,6 +530,11 @@ void main() {
 
 )";
 
+// =============================================================================
+// Section: Compute Shader Pipeline — Persistent State
+//   All compute pipeline resources are lazily initialized once and reused.
+// =============================================================================
+
 static bool g_compute_inited = false;
 std::vector<GLuint> g_prefix_sum(1);
 GLuint g_prefixsumbuffer = 0;
@@ -450,7 +545,11 @@ GLuint g_compute_program = 0;
 GLint g_element_size_loc = -1;
 char g_compile_info[1024];
 
-GLuint compile_compute_program(const std::string& src) {
+// =============================================================================
+// Section: Compute Shader — Compilation
+// =============================================================================
+
+static GLuint compile_compute_program(const std::string& src) {
     INIT_CHECK_GL_ERROR
     auto program = GLES.glCreateProgram();
     CHECK_GL_ERROR_NO_INIT
@@ -504,7 +603,17 @@ GLuint compile_compute_program(const std::string& src) {
     return program;
 }
 
-GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsizei* counts, GLenum type,
+// =============================================================================
+// Section: Strategy — Compute (with basevertex)
+//   CPU simulation via compute shader pipeline:
+//     1. Validate inputs (fall back to DrawElements on error).
+//     2. Build prefix sums, first-index, and base-vertex arrays.
+//     3. Dispatch compute shader to merge all index buffers into one output.
+//     4. Draw once with glDrawElements using the merged output buffer.
+//   Falls back to DrawElements for strip-like modes.
+// =============================================================================
+
+GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, const GLsizei* counts, GLenum type,
                                                                const void* const* indices, GLsizei primcount,
                                                                const GLint* basevertex) {
     LOG()
@@ -541,11 +650,9 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         return;
     }
 
-    // Align compute shader input format with standard OpenGL indirect-draw format
-    //    prepare_indirect_buffer(counts, type, indices, primcount, basevertex);
-    //    prepare_compute_drawcmd_ssbo(counts, type, indices, primcount, basevertex);
-
-    // Init compute buffers
+    // -------------------------------------------------------------------------
+    // Lazy initialization of compute pipeline resources
+    // -------------------------------------------------------------------------
     if (!g_compute_inited) {
         LOG_D("Initializing multidraw compute pipeline...")
         GLES.glGenBuffers(1, &g_prefixsumbuffer);
@@ -571,6 +678,9 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         g_compute_inited = true;
     }
 
+    // -------------------------------------------------------------------------
+    // Validate element array buffer
+    // -------------------------------------------------------------------------
     GLint ibo = 0;
     GLES.glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &ibo);
     CHECK_GL_ERROR_NO_INIT
@@ -593,6 +703,9 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         return;
     }
 
+    // -------------------------------------------------------------------------
+    // Build prefix sums, first-index, and base-vertex arrays
+    // -------------------------------------------------------------------------
     g_prefix_sum.resize(primcount);
     std::vector<GLuint> first_index(primcount, 0);
     std::vector<GLint> base_vtx(primcount, 0);
@@ -653,11 +766,16 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         return;
     }
 
+    // -------------------------------------------------------------------------
+    // Save GL state before compute dispatch
+    // -------------------------------------------------------------------------
     GLint prev_ssbo_binding = 0;
     GLES.glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &prev_ssbo_binding);
     CHECK_GL_ERROR_NO_INIT
 
-    // Fill in the data
+    // -------------------------------------------------------------------------
+    // Upload SSBO data
+    // -------------------------------------------------------------------------
     GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, g_firstidx_ssbo);
     CHECK_GL_ERROR_NO_INIT
     GLES.glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint) * primcount, first_index.data(), GL_DYNAMIC_DRAW);
@@ -673,7 +791,6 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     GLES.glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint) * primcount, g_prefix_sum.data(), GL_DYNAMIC_DRAW);
     CHECK_GL_ERROR_NO_INIT
 
-    // Allocate output buffer
     GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, g_outputibo);
     CHECK_GL_ERROR_NO_INIT
     GLES.glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint) * total_indices, nullptr, GL_DYNAMIC_DRAW);
@@ -682,7 +799,9 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     CHECK_GL_ERROR_NO_INIT
 
-    // Bind buffers
+    // -------------------------------------------------------------------------
+    // Bind SSBOs at base indices
+    // -------------------------------------------------------------------------
     GLint prev_ssbo_base[5] = {};
     for (int i = 0; i < 5; ++i) {
         GLES.glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, i, &prev_ssbo_base[i]);
@@ -700,7 +819,6 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     GLES.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, g_outputibo);
     CHECK_GL_ERROR_NO_INIT
 
-    // Save states
     GLint prev_program = 0;
     GLES.glGetIntegerv(GL_CURRENT_PROGRAM, &prev_program);
     CHECK_GL_ERROR_NO_INIT
@@ -708,7 +826,9 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     GLES.glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev_vb);
     CHECK_GL_ERROR_NO_INIT
 
-    // Dispatch compute
+    // -------------------------------------------------------------------------
+    // Dispatch compute shader
+    // -------------------------------------------------------------------------
     LOG_D("Using compute program = %d", g_compute_program)
     GLES.glUseProgram(g_compute_program);
     CHECK_GL_ERROR_NO_INIT
@@ -720,12 +840,13 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     GLES.glDispatchCompute((total_indices + 63) / 64, 1, 1);
     CHECK_GL_ERROR_NO_INIT
 
-    // Wait for compute to complete
+    // -------------------------------------------------------------------------
+    // Memory barrier and draw
+    // -------------------------------------------------------------------------
     LOG_D("memory barrier")
     GLES.glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_ELEMENT_ARRAY_BARRIER_BIT);
     CHECK_GL_ERROR_NO_INIT
 
-    // Bind index buffer and do draw
     LOG_D("draw")
     GLES.glUseProgram(prev_program);
     CHECK_GL_ERROR_NO_INIT
@@ -735,7 +856,9 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     CHECK_GL_ERROR_NO_INIT
     GLES.glDrawElements(mode, total_indices, GL_UNSIGNED_INT, 0);
 
-    // Restore states
+    // -------------------------------------------------------------------------
+    // Restore GL state
+    // -------------------------------------------------------------------------
     for (int i = 0; i < 5; ++i) {
         GLES.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, prev_ssbo_base[i]);
         CHECK_GL_ERROR_NO_INIT

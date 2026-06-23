@@ -5,14 +5,38 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
+// ============================================================================
+// Pixel Format Conversion Architecture
+//
+// Principle: "ES 3.2 native → native, ES 3.2 not native → CPU simulation"
+//
+// This file implements CPU-side pixel format conversion utilities needed
+// because OpenGL supports more pixel formats than OpenGL ES 3.2.
+//
+// When a desktop OpenGL pixel format is not natively supported by ES 3.2,
+// the pixel data is converted on the CPU before being passed to the native
+// GLES implementation. This is CPU simulation, not GPU simulation.
+//
+// Supported conversions:
+//   - Format size queries (gl_sizeof, pixel_sizeof)
+//   - Packed type detection (is_type_packed)
+//   - Color channel layout mapping (get_color_map)
+//   - Full pixel data conversion (pixel_convert):
+//       BGRA ↔ RGBA, LUMINANCE → RGBA/RGB, BGR → RGB/RGBA,
+//       RGBA/BGRA → RGB565/RGBA5551/RGBA4444, unpacked → packed, etc.
+// ============================================================================
+
 #include "pixel.h"
 #include "log.h"
 #include "mg.h"
 
 #define DEBUG 0
 
+// ============================================================================
+// Section: Type Size Query
+// ============================================================================
+
 GLsizei gl_sizeof(GLenum type) {
-    // types
     switch (type) {
     case GL_DOUBLE:
         return 8;
@@ -55,6 +79,10 @@ GLsizei gl_sizeof(GLenum type) {
     }
 }
 
+// ============================================================================
+// Section: Packed Type Detection
+// ============================================================================
+
 GLboolean is_type_packed(GLenum type) {
     switch (type) {
     case GL_4_BYTES:
@@ -78,6 +106,10 @@ GLboolean is_type_packed(GLenum type) {
         return false;
     }
 }
+
+// ============================================================================
+// Section: Pixel Size Calculation
+// ============================================================================
 
 GLsizei pixel_sizeof(GLenum format, GLenum type) {
     GLsizei width = 0;
@@ -117,6 +149,10 @@ GLsizei pixel_sizeof(GLenum format, GLenum type) {
     return width * gl_sizeof(type);
 }
 
+// ============================================================================
+// Section: Color Channel Layout Mapping
+// ============================================================================
+
 static const colorlayout_t* get_color_map(GLenum format) {
 #define map(fmt, ...)                                                                                                  \
     case fmt: {                                                                                                        \
@@ -136,6 +172,19 @@ static const colorlayout_t* get_color_map(GLenum format) {
 #undef map
 }
 
+// ============================================================================
+// Section: Pixel Format Conversion (CPU Simulation)
+//
+// Converts pixel data between different format/type combinations on the CPU.
+// This is needed when the source format is not natively supported by ES 3.2
+// but the destination format is (or vice versa).
+//
+// Conversion rules:
+//   1. Same format & type → memcpy (fast path)
+//   2. Specialized fast paths for common conversions (BGRA↔RGBA, etc.)
+//   3. Fallback: no general conversion, returns true
+// ============================================================================
+
 bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height, GLenum src_format, GLenum src_type,
                    GLenum dst_format, GLenum dst_type, GLuint stride, GLuint align) {
     const colorlayout_t *src_color, *dst_color;
@@ -148,13 +197,9 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
     GLuint src_width = widthalign(width * pixel_sizeof(src_format, src_type), align);
     GLuint src_widthadj = src_width - (width * pixel_sizeof(src_format, src_type));
 
-    // printf("pixel conversion: %ix%i - %s, %s (%d) ==> %s, %s (%d),
-    // transform=%i, align=%d, src_width=%d(%d), dst_width=%d(%d)\n", width,
-    // height, PrintEnum(src_format), PrintEnum(src_type),pixel_sizeof(src_format,
-    // src_type), PrintEnum(dst_format), PrintEnum(dst_type),
-    // pixel_sizeof(dst_format, dst_type), raster_need_transform(), align,
-    // src_width, src_widthadj, dst_width2, dst_width);
-
+    // ---------------------------------------------------------------------------
+    // Fast path: same format and type → memcpy (no conversion needed)
+    // ---------------------------------------------------------------------------
     if ((src_type == dst_type) && (dst_format == src_format)) {
         if (*dst == src) return true;
         if (!dst_size || !pixel_sizeof(src_format, src_type)) {
@@ -171,6 +216,7 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
             memcpy(*dst, src, dst_size);
         return true;
     }
+
     src_color = get_color_map(src_format);
     dst_color = get_color_map(dst_format);
     if (!dst_size || !pixel_sizeof(src_format, src_type) || !src_color->type || !dst_color->type) {
@@ -182,9 +228,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
     if (*dst == src || *dst == nullptr) *dst = malloc(dst_size);
     uintptr_t src_pos = widthalign((uintptr_t)src, align);
     uintptr_t dst_pos = widthalign((uintptr_t)*dst, align);
-    // fast optimized loop for common conversion cases first...
-    // TODO: Rewrite that with some Macro, it's obviously doable to simplify the
-    // reading (and writing) of all this simple BGRA <-> RGBA / UNSIGNED_BYTE
+
+    // ---------------------------------------------------------------------------
+    // Fast path: BGRA ↔ RGBA with UNSIGNED_BYTE
+    // ---------------------------------------------------------------------------
     if ((((src_format == GL_BGRA) && (dst_format == GL_RGBA)) ||
          ((src_format == GL_RGBA) && (dst_format == GL_BGRA))) &&
         (dst_type == GL_UNSIGNED_BYTE) && ((src_type == GL_UNSIGNED_BYTE))) {
@@ -205,7 +252,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // RGBA or BGRA with GL_INT_8_8_8_8 <-> GL_INT_8_8_8_8_REV
+
+    // ---------------------------------------------------------------------------
+    // Fast path: RGBA/BGRA with GL_INT_8_8_8_8 ↔ GL_INT_8_8_8_8_REV
+    // ---------------------------------------------------------------------------
     if ((src_format == dst_format) && (src_format == GL_RGBA || src_format == GL_BGRA) &&
         ((src_type == GL_INT8 && dst_type == GL_INT8_REV) || (src_type == GL_INT8_REV && dst_type == GL_INT8))) {
         for (int i = 0; i < height; i++) {
@@ -222,8 +272,11 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
+
 #ifdef __BIG_ENDIAN__
-    // RGBA or BGRA with GL_UNSIGNED_INT_8_8_8_8_REV <-> GL_UNSIGNED_BYTE
+    // ---------------------------------------------------------------------------
+    // Fast path: RGBA/BGRA with UNSIGNED_INT_8_8_8_8_REV ↔ UNSIGNED_BYTE (big endian)
+    // ---------------------------------------------------------------------------
     if ((src_format == dst_format) && (src_format == GL_RGBA || src_format == GL_BGRA) &&
         ((src_type == GL_UNSIGNED_INT_8_8_8_8_REV && dst_type == GL_UNSIGNED_BYTE) ||
          (src_type == GL_UNSIGNED_BYTE && dst_type == GL_UNSIGNED_INT_8_8_8_8_REV))) {
@@ -242,13 +295,15 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         return true;
     }
 #endif
-    // BGRA1555 -> RGBA5551
+
+    // ---------------------------------------------------------------------------
+    // BGRA1555 → RGBA5551
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_BGRA) && (dst_format == GL_RGBA) && (dst_type == GL_UNSIGNED_SHORT_5_5_5_1) &&
         (src_type == GL_UNSIGNED_SHORT_1_5_5_5_REV)) {
         GLushort tmp;
         for (int i = 0; i < height; i++) {
             for (int j = 0; j < width; j++) {
-                // invert 1555/BGRA to 5551/RGBA (0x1f / 0x3e0 / 7c00)
                 tmp = *(GLushort*)src_pos;
                 *(GLushort*)dst_pos = ((tmp & 0x8000) >> 15) | ((tmp & 0x7fff) << 1);
                 src_pos += src_stride;
@@ -259,12 +314,14 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // L -> RGBA
+
+    // ---------------------------------------------------------------------------
+    // LUMINANCE → RGBA (expand grayscale to RGBA with alpha=255)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_LUMINANCE) && (dst_format == GL_RGBA) && (dst_type == GL_UNSIGNED_BYTE) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
             for (int j = 0; j < width; j++) {
-                // tmp = *(const GLuint*)src_pos;
                 auto* byte_dst = (unsigned char*)dst_pos;
 #ifdef __BIG_ENDIAN__
                 byte_dst[1] = byte_dst[2] = byte_dst[3] = *(GLubyte*)src_pos;
@@ -281,12 +338,14 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // L -> RGB
+
+    // ---------------------------------------------------------------------------
+    // LUMINANCE → RGB (expand grayscale to RGB)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_LUMINANCE) && (dst_format == GL_RGB) && (dst_type == GL_UNSIGNED_BYTE) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
             for (int j = 0; j < width; j++) {
-                // tmp = *(const GLuint*)src_pos;
                 auto* byte_dst = (unsigned char*)dst_pos;
                 byte_dst[0] = byte_dst[1] = byte_dst[2] = *(GLubyte*)src_pos;
                 src_pos += src_stride;
@@ -297,12 +356,14 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // RGBA -> LA
+
+    // ---------------------------------------------------------------------------
+    // RGBA → LUMINANCE_ALPHA (RGB→L weighted conversion)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_RGBA) && (dst_format == GL_LUMINANCE_ALPHA) && (dst_type == GL_UNSIGNED_BYTE) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
             for (int j = 0; j < width; j++) {
-                // tmp = *(const GLuint*)src_pos;
                 auto* byte_src = (unsigned char*)src_pos;
 #ifdef __BIG_ENDIAN__
                 *(GLushort*)dst_pos =
@@ -321,12 +382,14 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // BGRA -> LA
+
+    // ---------------------------------------------------------------------------
+    // BGRA → LUMINANCE_ALPHA (BGR→L weighted conversion)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_BGRA) && (dst_format == GL_LUMINANCE_ALPHA) && (dst_type == GL_UNSIGNED_BYTE) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
             for (int j = 0; j < width; j++) {
-                // tmp = *(const GLuint*)src_pos;
                 auto* byte_src = (unsigned char*)src_pos;
 #ifdef __BIG_ENDIAN__
                 *(GLushort*)dst_pos =
@@ -345,12 +408,14 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // RGB(A) -> L
+
+    // ---------------------------------------------------------------------------
+    // RGB(A) → LUMINANCE (weighted RGB→grayscale conversion)
+    // ---------------------------------------------------------------------------
     if (((src_format == GL_RGBA) || (src_format == GL_RGB)) && (dst_format == GL_LUMINANCE) &&
         (dst_type == GL_UNSIGNED_BYTE) && ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
             for (int j = 0; j < width; j++) {
-                // tmp = *(const GLuint*)src_pos;
                 auto* byte_src = (unsigned char*)src_pos;
 #ifdef __BIG_ENDIAN__
                 *(unsigned char*)dst_pos =
@@ -367,12 +432,14 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // BGR(A) -> L
+
+    // ---------------------------------------------------------------------------
+    // BGR(A) → LUMINANCE (weighted BGR→grayscale conversion)
+    // ---------------------------------------------------------------------------
     if (((src_format == GL_BGRA) || (src_format == GL_BGR)) && (dst_format == GL_LUMINANCE) &&
         (dst_type == GL_UNSIGNED_BYTE) && ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
             for (int j = 0; j < width; j++) {
-                // tmp = *(const GLuint*)src_pos;
                 auto* byte_src = (unsigned char*)src_pos;
 #ifdef __BIG_ENDIAN__
                 *(unsigned char*)dst_pos =
@@ -389,7 +456,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // BGR(A) -> RGB
+
+    // ---------------------------------------------------------------------------
+    // BGR(A) → RGB (channel swap)
+    // ---------------------------------------------------------------------------
     if (((src_format == GL_BGR) || (src_format == GL_BGRA)) && (dst_format == GL_RGB) &&
         (dst_type == GL_UNSIGNED_BYTE) && ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
@@ -405,7 +475,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // BGR -> RGBA
+
+    // ---------------------------------------------------------------------------
+    // BGR → RGBA (channel swap + alpha=255)
+    // ---------------------------------------------------------------------------
     if (((src_format == GL_BGR)) && (dst_format == GL_RGBA) && (dst_type == GL_UNSIGNED_BYTE) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
@@ -422,7 +495,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // RGBA -> RGB
+
+    // ---------------------------------------------------------------------------
+    // RGBA → RGB (drop alpha channel)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_RGBA) && (dst_format == GL_RGB) && (dst_type == GL_UNSIGNED_BYTE) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
@@ -438,7 +514,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // RGB(A) -> RGB565
+
+    // ---------------------------------------------------------------------------
+    // RGB(A) → RGB565 (8-bit channels → packed 16-bit)
+    // ---------------------------------------------------------------------------
     if (((src_format == GL_RGB) || (src_format == GL_RGBA)) && (dst_format == GL_RGB) &&
         (dst_type == GL_UNSIGNED_SHORT_5_6_5) && ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
@@ -454,7 +533,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // BGR(A) -> RGB565
+
+    // ---------------------------------------------------------------------------
+    // BGR(A) → RGB565 (8-bit BGR channels → packed 16-bit RGB565)
+    // ---------------------------------------------------------------------------
     if (((src_format == GL_BGR) || (src_format == GL_BGRA)) && (dst_format == GL_RGB) &&
         (dst_type == GL_UNSIGNED_SHORT_5_6_5) && ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
@@ -470,7 +552,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // RGBA -> RGBA5551
+
+    // ---------------------------------------------------------------------------
+    // RGBA → RGBA5551 (8-bit channels → packed 16-bit RGBA5551)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_RGBA) && (dst_format == GL_RGBA) && (dst_type == GL_UNSIGNED_SHORT_5_5_5_1) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
@@ -487,7 +572,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // BGRA -> RGBA5551
+
+    // ---------------------------------------------------------------------------
+    // BGRA → RGBA5551 (8-bit BGRA channels → packed 16-bit RGBA5551)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_BGRA) && (dst_format == GL_RGBA) && (dst_type == GL_UNSIGNED_SHORT_5_5_5_1) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
@@ -504,7 +592,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // RGBA -> RGBA4444
+
+    // ---------------------------------------------------------------------------
+    // RGBA → RGBA4444 (8-bit channels → packed 16-bit RGBA4444)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_RGBA) && (dst_format == GL_RGBA) && (dst_type == GL_UNSIGNED_SHORT_4_4_4_4) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
@@ -520,7 +611,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // BGRA -> RGBA4444
+
+    // ---------------------------------------------------------------------------
+    // BGRA → RGBA4444 (8-bit BGRA channels → packed 16-bit RGBA4444)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_BGRA) && (dst_format == GL_RGBA) && (dst_type == GL_UNSIGNED_SHORT_4_4_4_4) &&
         ((src_type == GL_UNSIGNED_BYTE))) {
         for (int i = 0; i < height; i++) {
@@ -536,7 +630,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // BGRA4444 -> RGBA
+
+    // ---------------------------------------------------------------------------
+    // BGRA4444 → RGBA (unpacked 16-bit BGRA4444 → 8-bit RGBA)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_BGRA) && (dst_format == GL_RGBA) && (dst_type == GL_UNSIGNED_BYTE) &&
         (src_type == GL_UNSIGNED_SHORT_4_4_4_4_REV)) {
         for (int i = 0; i < height; i++) {
@@ -554,7 +651,10 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
-    // RGBA5551 -> RGBA
+
+    // ---------------------------------------------------------------------------
+    // RGBA5551 → RGBA (unpacked 16-bit RGBA5551 → 8-bit RGBA)
+    // ---------------------------------------------------------------------------
     if ((src_format == GL_RGBA) && (dst_format == GL_RGBA) && (dst_type == GL_UNSIGNED_BYTE) &&
         (src_type == GL_UNSIGNED_SHORT_5_5_5_1)) {
         for (int i = 0; i < height; i++) {
@@ -572,5 +672,6 @@ bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height,
         }
         return true;
     }
+
     return true;
 }

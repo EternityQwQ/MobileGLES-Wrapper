@@ -5,6 +5,21 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
+// ============================================================================
+// Core OpenGL Wrapper - Miscellaneous wrappers that don't fit elsewhere
+//
+// This file contains wrappers for functions that are NOT pure ES 3.2 native
+// pass-throughs but also don't belong to a specific subsystem:
+//   - glClearDepth: double→float conversion (not in ES 3.2)
+//   - glClear: ANGLE depth-clear bug workaround
+//   - glHint: simple pass-through
+//
+// State tracking functions (glActiveTexture, glBindBuffer, etc.) are in
+// their respective subsystem files (texture.cpp, buffer.cpp, etc.).
+// Pure native pass-throughs are in gl_native.cpp.
+// State queries are in getter.cpp.
+// ============================================================================
+
 #include "../includes.h"
 #include <GL/gl.h>
 #include "glcorearb.h"
@@ -13,20 +28,28 @@
 #include "../config/settings.h"
 #include "mg.h"
 #include "framebuffer.h"
+#include "FSR1/FSR1.h"
+
+#include <cmath>
 
 #define DEBUG 0
 
-static GLclampd currentDepthValue;
+// ============================================================================
+// External Declarations
+// ============================================================================
 
 extern GLuint current_draw_fbo;
 extern std::vector<framebuffer_t> framebuffers;
 
-void glClearDepth(GLclampd depth) {
-    LOG()
-    currentDepthValue = depth;
-    GLES.glClearDepthf((float)depth);
-    CHECK_GL_ERROR
-}
+// ============================================================================
+// Local State
+// ============================================================================
+
+static GLclampd currentDepthValue;
+
+// ============================================================================
+// Section: Depth Clear Workaround (ANGLE depth-clear bug fix)
+// ============================================================================
 
 static GLuint g_depthClearProgram = 0;
 static GLuint g_depthClearVAO = 0;
@@ -38,21 +61,20 @@ static const char* kDepthClearVS = R"glsl(
     #version 300 es
     layout(location = 0) in vec2 aPos;
     void main() {
-        // Write far‐plane depth
         gl_Position = vec4(aPos, 1.0, 1.0);
     }
 )glsl";
+
 static const char* kDepthClearFS = R"glsl(
     #version 300 es
     precision mediump float;
     out vec4 fragColor;
     void main() {
-        // Empty—color writes will be disabled
         fragColor = vec4(0.0);
     }
 )glsl";
 
-void InitDepthClearCoreProfile() {
+static void InitDepthClearCoreProfile() {
     if (g_depthClearProgram) return;
 
     auto compile = [&](GLenum type, const char* src) {
@@ -85,7 +107,7 @@ void InitDepthClearCoreProfile() {
     GLES.glBindVertexArray(0);
 }
 
-void DrawDepthClearTri() {
+static void DrawDepthClearTri() {
     InitDepthClearCoreProfile();
 
     GLboolean prevColorMask[4];
@@ -110,27 +132,37 @@ void DrawDepthClearTri() {
     GLES.glColorMask(prevColorMask[0], prevColorMask[1], prevColorMask[2], prevColorMask[3]);
 }
 
+// ============================================================================
+// Section: glClearDepth — double→float conversion (ES 3.2 only has glClearDepthf)
+// ============================================================================
+
+void glClearDepth(GLclampd depth) {
+    LOG()
+    currentDepthValue = depth;
+    GLES.glClearDepthf((float)depth);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Section: glClear — ANGLE depth-clear bug workaround
+// ============================================================================
+
 void glClear(GLbitfield mask) {
     LOG();
     LOG_D("glClear, mask = 0x%x", mask);
 
     INIT_CHECK_GL_ERROR
-
     CHECK_GL_ERROR_NO_INIT
 
     if (global_settings.angle == AngleMode::Enabled && mask == GL_DEPTH_BUFFER_BIT &&
         fabs(currentDepthValue - 1.0f) <= 0.001f && framebuffers[current_draw_fbo].color_attachments_all_none) {
         LOG_D("doing depth workaround")
         if (global_settings.angle_depth_clear_fix_mode == AngleDepthClearFixMode::Mode1)
-            // Workaround for ANGLE depth-clear bug: if depth≈1.0, draw a fullscreen triangle at z=1.0 to force actual
-            // depth buffer write.
             DrawDepthClearTri();
         else if (global_settings.angle_depth_clear_fix_mode == AngleDepthClearFixMode::Mode2) {
-            // Or just explicitly clear depth buffer and see what's happened
             const GLfloat clear_depth_value = 1.0f;
             GLES.glClearBufferfv(GL_DEPTH, 0, &clear_depth_value);
         }
-        // Clear again
         GLES.glClear(mask);
     } else {
         GLES.glClear(mask);
@@ -139,7 +171,12 @@ void glClear(GLbitfield mask) {
     CHECK_GL_ERROR_NO_INIT;
 }
 
+// ============================================================================
+// Section: glHint — simple pass-through
+// ============================================================================
+
 void glHint(GLenum target, GLenum mode) {
     LOG()
     LOG_D("glHint, target = %s, mode = %s", glEnumToString(target), glEnumToString(mode))
+    GLES.glHint(target, mode);
 }

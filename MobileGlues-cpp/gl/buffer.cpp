@@ -5,11 +5,19 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
+// ============================================================================
+// ES 3.2 native → native, ES 3.2 not native → CPU simulation
+// ============================================================================
+
 #include "buffer.h"
 #include "ankerl/unordered_dense.h"
 #include "texture.h"
 
 #define DEBUG 0
+
+// ============================================================================
+// Internal State: Buffer Map Management
+// ============================================================================
 
 GLuint bound_array;
 static GLint maxBufferId = 0;
@@ -27,6 +35,10 @@ static std::vector<size_t> g_buffer_datasize;
 
 static std::vector<GLuint> g_element_array_buffer_per_vao;
 
+// ============================================================================
+// Buffer Binding Index Tracking
+// ============================================================================
+
 enum BindingIndex : int {
     BI_ARRAY_BUFFER = 0,
     BI_ATOMIC_COUNTER,
@@ -43,6 +55,10 @@ enum BindingIndex : int {
     BINDING_COUNT
 };
 static std::array<GLuint, BINDING_COUNT> g_bound_buffers_arr = {0};
+
+// ============================================================================
+// Buffer Map Helpers: Capacity & Lifecycle
+// ============================================================================
 
 static inline int ensure_buffer_capacity(GLuint id) {
     if ((int)g_gen_buffers.size() <= (int)id) {
@@ -130,34 +146,25 @@ size_t get_buffer_data_size(GLuint buffer) {
     return 0;
 }
 
+// ============================================================================
+// Buffer Binding Helpers
+// ============================================================================
+
 static inline int binding_target_to_index(GLenum target) {
     switch (target) {
-    case GL_ARRAY_BUFFER:
-        return BI_ARRAY_BUFFER;
-    case GL_ATOMIC_COUNTER_BUFFER:
-        return BI_ATOMIC_COUNTER;
-    case GL_COPY_READ_BUFFER:
-        return BI_COPY_READ;
-    case GL_COPY_WRITE_BUFFER:
-        return BI_COPY_WRITE;
-    case GL_DRAW_INDIRECT_BUFFER:
-        return BI_DRAW_INDIRECT;
-    case GL_DISPATCH_INDIRECT_BUFFER:
-        return BI_DISPATCH_INDIRECT;
-    case GL_ELEMENT_ARRAY_BUFFER:
-        return BI_ELEMENT_ARRAY;
-    case GL_PIXEL_PACK_BUFFER:
-        return BI_PIXEL_PACK;
-    case GL_PIXEL_UNPACK_BUFFER:
-        return BI_PIXEL_UNPACK;
-    case GL_SHADER_STORAGE_BUFFER:
-        return BI_SHADER_STORAGE;
-    case GL_TRANSFORM_FEEDBACK_BUFFER:
-        return BI_TRANSFORM_FEEDBACK;
-    case GL_UNIFORM_BUFFER:
-        return BI_UNIFORM_BUFFER;
-    default:
-        return -1;
+    case GL_ARRAY_BUFFER:             return BI_ARRAY_BUFFER;
+    case GL_ATOMIC_COUNTER_BUFFER:    return BI_ATOMIC_COUNTER;
+    case GL_COPY_READ_BUFFER:         return BI_COPY_READ;
+    case GL_COPY_WRITE_BUFFER:        return BI_COPY_WRITE;
+    case GL_DRAW_INDIRECT_BUFFER:     return BI_DRAW_INDIRECT;
+    case GL_DISPATCH_INDIRECT_BUFFER: return BI_DISPATCH_INDIRECT;
+    case GL_ELEMENT_ARRAY_BUFFER:     return BI_ELEMENT_ARRAY;
+    case GL_PIXEL_PACK_BUFFER:        return BI_PIXEL_PACK;
+    case GL_PIXEL_UNPACK_BUFFER:      return BI_PIXEL_UNPACK;
+    case GL_SHADER_STORAGE_BUFFER:    return BI_SHADER_STORAGE;
+    case GL_TRANSFORM_FEEDBACK_BUFFER:return BI_TRANSFORM_FEEDBACK;
+    case GL_UNIFORM_BUFFER:           return BI_UNIFORM_BUFFER;
+    default:                          return -1;
     }
 }
 
@@ -169,45 +176,19 @@ void set_bound_buffer_by_target(GLenum target, GLuint buffer) {
 GLuint find_bound_buffer(GLenum key) {
     GLenum target = 0;
     switch (key) {
-    case GL_ARRAY_BUFFER_BINDING:
-        target = GL_ARRAY_BUFFER;
-        break;
-    case GL_ATOMIC_COUNTER_BUFFER_BINDING:
-        target = GL_ATOMIC_COUNTER_BUFFER;
-        break;
-    case GL_COPY_READ_BUFFER_BINDING:
-        target = GL_COPY_READ_BUFFER;
-        break;
-    case GL_COPY_WRITE_BUFFER_BINDING:
-        target = GL_COPY_WRITE_BUFFER;
-        break;
-    case GL_DRAW_INDIRECT_BUFFER_BINDING:
-        target = GL_DRAW_INDIRECT_BUFFER;
-        break;
-    case GL_DISPATCH_INDIRECT_BUFFER_BINDING:
-        target = GL_DISPATCH_INDIRECT_BUFFER;
-        break;
-    case GL_ELEMENT_ARRAY_BUFFER_BINDING:
-        target = GL_ELEMENT_ARRAY_BUFFER;
-        break;
-    case GL_PIXEL_PACK_BUFFER_BINDING:
-        target = GL_PIXEL_PACK_BUFFER;
-        break;
-    case GL_PIXEL_UNPACK_BUFFER_BINDING:
-        target = GL_PIXEL_UNPACK_BUFFER;
-        break;
-    case GL_SHADER_STORAGE_BUFFER_BINDING:
-        target = GL_SHADER_STORAGE_BUFFER;
-        break;
-    case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING:
-        target = GL_TRANSFORM_FEEDBACK_BUFFER;
-        break;
-    case GL_UNIFORM_BUFFER_BINDING:
-        target = GL_UNIFORM_BUFFER;
-        break;
-    default:
-        target = 0;
-        break;
+    case GL_ARRAY_BUFFER_BINDING:              target = GL_ARRAY_BUFFER;              break;
+    case GL_ATOMIC_COUNTER_BUFFER_BINDING:     target = GL_ATOMIC_COUNTER_BUFFER;     break;
+    case GL_COPY_READ_BUFFER_BINDING:          target = GL_COPY_READ_BUFFER;          break;
+    case GL_COPY_WRITE_BUFFER_BINDING:         target = GL_COPY_WRITE_BUFFER;         break;
+    case GL_DRAW_INDIRECT_BUFFER_BINDING:      target = GL_DRAW_INDIRECT_BUFFER;      break;
+    case GL_DISPATCH_INDIRECT_BUFFER_BINDING:  target = GL_DISPATCH_INDIRECT_BUFFER;  break;
+    case GL_ELEMENT_ARRAY_BUFFER_BINDING:      target = GL_ELEMENT_ARRAY_BUFFER;      break;
+    case GL_PIXEL_PACK_BUFFER_BINDING:         target = GL_PIXEL_PACK_BUFFER;         break;
+    case GL_PIXEL_UNPACK_BUFFER_BINDING:       target = GL_PIXEL_UNPACK_BUFFER;       break;
+    case GL_SHADER_STORAGE_BUFFER_BINDING:     target = GL_SHADER_STORAGE_BUFFER;     break;
+    case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING: target = GL_TRANSFORM_FEEDBACK_BUFFER; break;
+    case GL_UNIFORM_BUFFER_BINDING:            target = GL_UNIFORM_BUFFER;            break;
+    default:                                   target = 0;                            break;
     }
     if (target == GL_ELEMENT_ARRAY_BUFFER) {
         return get_ibo_by_vao(find_bound_array());
@@ -216,6 +197,28 @@ GLuint find_bound_buffer(GLenum key) {
     if (idx >= 0) return g_bound_buffers_arr[idx];
     return 0;
 }
+
+static GLenum get_binding_query(GLenum target) {
+    switch (target) {
+    case GL_ARRAY_BUFFER:              return GL_ARRAY_BUFFER_BINDING;
+    case GL_ELEMENT_ARRAY_BUFFER:      return GL_ELEMENT_ARRAY_BUFFER_BINDING;
+    case GL_PIXEL_PACK_BUFFER:         return GL_PIXEL_PACK_BUFFER_BINDING;
+    case GL_PIXEL_UNPACK_BUFFER:       return GL_PIXEL_UNPACK_BUFFER_BINDING;
+    case GL_COPY_WRITE_BUFFER:         return GL_COPY_WRITE_BUFFER_BINDING;
+    case GL_COPY_READ_BUFFER:          return GL_COPY_READ_BUFFER_BINDING;
+    case GL_UNIFORM_BUFFER:            return GL_UNIFORM_BUFFER_BINDING;
+    case GL_SHADER_STORAGE_BUFFER:     return GL_SHADER_STORAGE_BUFFER_BINDING;
+    case GL_TRANSFORM_FEEDBACK_BUFFER: return GL_TRANSFORM_FEEDBACK_BUFFER_BINDING;
+    case GL_ATOMIC_COUNTER_BUFFER:     return GL_ATOMIC_COUNTER_BUFFER_BINDING;
+    case GL_DRAW_INDIRECT_BUFFER:      return GL_DRAW_INDIRECT_BUFFER_BINDING;
+    case GL_DISPATCH_INDIRECT_BUFFER:  return GL_DISPATCH_INDIRECT_BUFFER_BINDING;
+    default:                           return 0;
+    }
+}
+
+// ============================================================================
+// Vertex Array Map Helpers
+// ============================================================================
 
 GLuint gen_array() {
     if (!g_free_array_ids.empty()) {
@@ -261,36 +264,9 @@ GLuint find_real_array(GLuint key) {
     return 0;
 }
 
-static GLenum get_binding_query(GLenum target) {
-    switch (target) {
-    case GL_ARRAY_BUFFER:
-        return GL_ARRAY_BUFFER_BINDING;
-    case GL_ELEMENT_ARRAY_BUFFER:
-        return GL_ELEMENT_ARRAY_BUFFER_BINDING;
-    case GL_PIXEL_PACK_BUFFER:
-        return GL_PIXEL_PACK_BUFFER_BINDING;
-    case GL_PIXEL_UNPACK_BUFFER:
-        return GL_PIXEL_UNPACK_BUFFER_BINDING;
-    case GL_COPY_WRITE_BUFFER:
-        return GL_COPY_WRITE_BUFFER_BINDING;
-    case GL_COPY_READ_BUFFER:
-        return GL_COPY_READ_BUFFER_BINDING;
-    case GL_UNIFORM_BUFFER:
-        return GL_UNIFORM_BUFFER_BINDING;
-    case GL_SHADER_STORAGE_BUFFER:
-        return GL_SHADER_STORAGE_BUFFER_BINDING;
-    case GL_TRANSFORM_FEEDBACK_BUFFER:
-        return GL_TRANSFORM_FEEDBACK_BUFFER_BINDING;
-    case GL_ATOMIC_COUNTER_BUFFER:
-        return GL_ATOMIC_COUNTER_BUFFER_BINDING;
-    case GL_DRAW_INDIRECT_BUFFER:
-        return GL_DRAW_INDIRECT_BUFFER_BINDING;
-    case GL_DISPATCH_INDIRECT_BUFFER:
-        return GL_DISPATCH_INDIRECT_BUFFER_BINDING;
-    default:
-        return 0;
-    }
-}
+// ============================================================================
+// Map Initialization
+// ============================================================================
 
 void InitBufferMap(size_t expectedSize) {
     g_gen_buffers.reserve(expectedSize + 2);
@@ -309,6 +285,10 @@ void InitVertexArrayMap(size_t expectedSize) {
     g_gen_array_exists.resize(1, 0);
     g_element_array_buffer_per_vao.resize(1, 0);
 }
+
+// ============================================================================
+// Buffer Object Lifecycle (ES 3.2 native)
+// ============================================================================
 
 void glGenBuffers(GLsizei n, GLuint* buffers) {
     LOG()
@@ -337,6 +317,10 @@ GLboolean glIsBuffer(GLuint buffer) {
     return has_buffer(buffer);
 }
 
+// ============================================================================
+// Buffer Binding (ES 3.2 native, with buffer map)
+// ============================================================================
+
 void glBindBuffer(GLenum target, GLuint buffer) {
     LOG()
     LOG_D("glBindBuffer, target = %s, buffer = %d", glEnumToString(target), buffer)
@@ -362,6 +346,77 @@ void glBindBuffer(GLenum target, GLuint buffer) {
     CHECK_GL_ERROR
 }
 
+// ============================================================================
+// Buffer Data Upload (ES 3.2 native, with buffer map)
+// ============================================================================
+
+void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
+    LOG()
+    LOG_D("glBufferData, target = %s, size = %d, data = 0x%x, usage = %s", glEnumToString(target), size, data,
+          glEnumToString(usage))
+    GLES.glBufferData(target, size, data, usage);
+    set_buffer_data_size(find_bound_buffer(target), size);
+    CHECK_GL_ERROR
+}
+
+void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
+    LOG()
+    LOG_D("glBufferSubData, target = %s, offset = %d, size = %d, data = %p", glEnumToString(target), offset, size, data)
+    GLES.glBufferSubData(target, offset, size, data);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Buffer Mapping (ES 3.2 native)
+// ============================================================================
+
+void* glMapBuffer(GLenum target, GLenum access) {
+    LOG()
+    LOG_D("glMapBuffer, target = %s, access = %s", glEnumToString(target), glEnumToString(access))
+    if (g_gles_caps.GL_OES_mapbuffer) {
+        return GLES.glMapBufferOES(target, access);
+    }
+    GLint buffer_size;
+    GLES.glGetBufferParameteriv(target, GL_BUFFER_SIZE, &buffer_size);
+    if (buffer_size <= 0 || glGetError() != GL_NO_ERROR) {
+        return nullptr;
+    }
+    GLbitfield flags = 0;
+    switch (access) {
+    case GL_READ_ONLY:  flags = GL_MAP_READ_BIT;                              break;
+    case GL_WRITE_ONLY: flags = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT; break;
+    case GL_READ_WRITE: flags = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;            break;
+    default:            return nullptr;
+    }
+    void* ptr = glMapBufferRange(target, 0, buffer_size, flags);
+    return ptr;
+}
+
+void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
+    LOG()
+    if (global_settings.buffer_coherent_as_flush) access &= ~GL_MAP_FLUSH_EXPLICIT_BIT;
+    return GLES.glMapBufferRange(target, offset, length, access);
+}
+
+GLboolean glUnmapBuffer(GLenum target) {
+    LOG()
+    LOG_D("%s(%s)", __func__, glEnumToString(target));
+    if (g_gles_caps.GL_OES_mapbuffer) return GLES.glUnmapBuffer(target);
+
+    GLboolean result = GLES.glUnmapBuffer(target);
+    CHECK_GL_ERROR
+    return result;
+}
+
+void glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
+    LOG()
+    if (!global_settings.buffer_coherent_as_flush) GLES.glFlushMappedBufferRange(target, offset, length);
+}
+
+// ============================================================================
+// Buffer Range / Base Binding (ES 3.2 native, with buffer map)
+// ============================================================================
+
 struct atomic_buffer {
     GLuint id;
     GLsizeiptr size;
@@ -369,7 +424,7 @@ struct atomic_buffer {
 };
 
 static std::vector<atomic_buffer> g_buffer_map_atomic_buffer_info;
-static std::vector<GLuint> g_buffer_map_ssbo_id; // shall we use this in the future?
+static std::vector<GLuint> g_buffer_map_ssbo_id;
 
 void bindAllAtomicCounterAsSSBO() {
     const size_t count = g_buffer_map_atomic_buffer_info.size();
@@ -434,12 +489,14 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     CHECK_GL_ERROR
 }
 
+// ============================================================================
+// Vertex Buffer Binding (ES 3.2 native, with buffer map)
+// ============================================================================
+
 void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
     LOG()
     LOG_D("glBindVertexBuffer, bindingindex = %d, buffer = %d, offset = %p, stride = %i", bindingindex, buffer, offset,
           stride)
-    // Todo: should record fake buffer binding here, when glGetVertexArrayIntegeri_v is called, should return fake
-    // buffer id
     if (!has_buffer(buffer) || buffer == 0) {
         GLES.glBindVertexBuffer(bindingindex, buffer, offset, stride);
         CHECK_GL_ERROR
@@ -455,94 +512,121 @@ void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLs
     CHECK_GL_ERROR
 }
 
+// ============================================================================
+// Buffer Copy (ES 3.2 native)
+// ============================================================================
+
+void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) {
+    LOG()
+    LOG_D("glCopyBufferSubData, readTarget = %s, writeTarget = %s, readOffset = %d, writeOffset = %d, size = %d",
+          glEnumToString(readTarget), glEnumToString(writeTarget), readOffset, writeOffset, size)
+    GLES.glCopyBufferSubData(readTarget, writeTarget, readOffset, writeOffset, size);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Buffer Parameter Queries (ES 3.2 native)
+// ============================================================================
+
+void glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params) {
+    LOG()
+    LOG_D("glGetBufferParameteriv, target = %s, pname = %s", glEnumToString(target), glEnumToString(pname))
+    GLES.glGetBufferParameteriv(target, pname, params);
+    CHECK_GL_ERROR
+}
+
+void glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64* params) {
+    LOG()
+    LOG_D("glGetBufferParameteri64v, target = %s, pname = %s", glEnumToString(target), glEnumToString(pname))
+    GLES.glGetBufferParameteri64v(target, pname, params);
+    CHECK_GL_ERROR
+}
+
+void glGetBufferPointerv(GLenum target, GLenum pname, void** params) {
+    LOG()
+    LOG_D("glGetBufferPointerv, target = %s, pname = %s", glEnumToString(target), glEnumToString(pname))
+    GLES.glGetBufferPointerv(target, pname, params);
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Buffer Storage (ES 3.2 native via EXT)
+// ============================================================================
+
+void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags) {
+    LOG()
+    if (GLES.glBufferStorageEXT) {
+        if (global_settings.buffer_coherent_as_flush &&
+            ((flags & GL_MAP_PERSISTENT_BIT) != 0 || (flags & GL_DYNAMIC_STORAGE_BIT) != 0))
+            flags |= (GL_MAP_WRITE_BIT | GL_MAP_COHERENT_BIT | GL_MAP_PERSISTENT_BIT);
+        GLES.glBufferStorageEXT(target, size, data, flags);
+    }
+    CHECK_GL_ERROR
+}
+
+// ============================================================================
+// Texture Buffer (ES 3.2 native, with CPU emulation fallback)
+// ============================================================================
+
 size_t get_internal_format_size(GLenum internalformat) {
     switch (internalformat) {
-    case GL_R8:
-        return 1;
+    case GL_R8:        return 1;
     case GL_R8I:
-    case GL_R8UI:
-        return 1;
-    case GL_R16:
-        return 2;
+    case GL_R8UI:      return 1;
+    case GL_R16:       return 2;
     case GL_R16I:
     case GL_R16UI:
-    case GL_R16F:
-        return 2;
+    case GL_R16F:      return 2;
     case GL_R32I:
     case GL_R32UI:
-    case GL_R32F:
-        return 4;
+    case GL_R32F:      return 4;
 
-    case GL_RG8:
-        return 2;
+    case GL_RG8:       return 2;
     case GL_RG8I:
-    case GL_RG8UI:
-        return 2;
-    case GL_RG16:
-        return 4;
+    case GL_RG8UI:     return 2;
+    case GL_RG16:      return 4;
     case GL_RG16I:
     case GL_RG16UI:
-    case GL_RG16F:
-        return 4;
+    case GL_RG16F:     return 4;
     case GL_RG32I:
     case GL_RG32UI:
-    case GL_RG32F:
-        return 8;
+    case GL_RG32F:     return 8;
 
-    case GL_RGB8:
-        return 3;
+    case GL_RGB8:      return 3;
     case GL_RGB8I:
-    case GL_RGB8UI:
-        return 3;
-    case GL_RGB16:
-        return 6;
+    case GL_RGB8UI:    return 3;
+    case GL_RGB16:     return 6;
     case GL_RGB16I:
     case GL_RGB16UI:
-    case GL_RGB16F:
-        return 6;
+    case GL_RGB16F:    return 6;
     case GL_RGB32I:
     case GL_RGB32UI:
-    case GL_RGB32F:
-        return 12;
+    case GL_RGB32F:    return 12;
 
-    case GL_RGBA8:
-        return 4;
+    case GL_RGBA8:     return 4;
     case GL_RGBA8I:
-    case GL_RGBA8UI:
-        return 4;
-    case GL_RGBA16:
-        return 8;
+    case GL_RGBA8UI:   return 4;
+    case GL_RGBA16:    return 8;
     case GL_RGBA16I:
     case GL_RGBA16UI:
-    case GL_RGBA16F:
-        return 8;
+    case GL_RGBA16F:   return 8;
     case GL_RGBA32I:
     case GL_RGBA32UI:
-    case GL_RGBA32F:
-        return 16;
+    case GL_RGBA32F:   return 16;
 
-    case GL_DEPTH_COMPONENT16:
-        return 2;
-    case GL_DEPTH_COMPONENT24:
-        return 3;
-    case GL_DEPTH_COMPONENT32:
-        return 4;
-    case GL_DEPTH_COMPONENT32F:
-        return 4;
-    case GL_DEPTH24_STENCIL8:
-        return 4;
-    case GL_DEPTH32F_STENCIL8:
-        return 5;
+    case GL_DEPTH_COMPONENT16:   return 2;
+    case GL_DEPTH_COMPONENT24:   return 3;
+    case GL_DEPTH_COMPONENT32:   return 4;
+    case GL_DEPTH_COMPONENT32F:  return 4;
+    case GL_DEPTH24_STENCIL8:    return 4;
+    case GL_DEPTH32F_STENCIL8:   return 5;
 
-    case GL_STENCIL_INDEX8:
-        return 1;
+    case GL_STENCIL_INDEX8:      return 1;
 
     case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
-    case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
-        return 8;
+    case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT: return 8;
     case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
-    case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
-        return 16;
+    case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT: return 16;
 
     default:
         LOG_E("Unknown internal format size for %s", glEnumToString(internalformat));
@@ -551,7 +635,7 @@ size_t get_internal_format_size(GLenum internalformat) {
 }
 
 extern std::string bufSampelerName;
-// Todo: any glGet* related to this function?
+
 void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
     LOG()
     LOG_D("glTexBuffer, target = %s, internalformat = %s, buffer = %d", glEnumToString(target),
@@ -618,13 +702,9 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
         GLES.glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &prev_skip_pixels);
         GLES.glGetIntegerv(GL_UNPACK_SKIP_ROWS, &prev_skip_rows);
 
-        // why do these 2 params not work
-        // GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        // GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, 0)
         GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
         GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
 
-        // TODO: Optimize the glTexImage2D call
         GLES.glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, GL_RED_INTEGER, GL_BYTE, nullptr);
 
         GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, real_buffer);
@@ -693,92 +773,9 @@ void glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLint
     CHECK_GL_ERROR
 }
 
-void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
-    LOG()
-    LOG_D("glBufferData, target = %s, size = %d, data = 0x%x, usage = %s", glEnumToString(target), size, data,
-          glEnumToString(usage))
-    GLES.glBufferData(target, size, data, usage);
-    set_buffer_data_size(find_bound_buffer(target), size);
-    CHECK_GL_ERROR
-}
-
-void* glMapBuffer(GLenum target, GLenum access) {
-    LOG()
-    LOG_D("glMapBuffer, target = %s, access = %s", glEnumToString(target), glEnumToString(access))
-    if (g_gles_caps.GL_OES_mapbuffer) {
-        return GLES.glMapBufferOES(target, access);
-    }
-    GLint buffer_size;
-    GLES.glGetBufferParameteriv(target, GL_BUFFER_SIZE, &buffer_size);
-    if (buffer_size <= 0 || glGetError() != GL_NO_ERROR) {
-        return nullptr;
-    }
-    GLbitfield flags = 0;
-    switch (access) {
-    case GL_READ_ONLY:
-        flags = GL_MAP_READ_BIT;
-        break;
-    case GL_WRITE_ONLY:
-        flags = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT;
-        break;
-    case GL_READ_WRITE:
-        flags = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;
-        break;
-    default:
-        return nullptr;
-    }
-    void* ptr = glMapBufferRange(target, 0, buffer_size, flags);
-    return ptr;
-}
-
-#if GLOBAL_DEBUG || DEBUG
-#include <fstream>
-#define BIN_FILE_PREFIX "/sdcard/MG/buf/"
-#endif
-
-extern "C"
-{
-    GLAPI GLAPIENTRY void* glMapBufferARB(GLenum target, GLenum access) __attribute__((alias("glMapBuffer")));
-    GLAPI GLAPIENTRY void glBufferDataARB(GLenum target, GLsizeiptr size, const void* data, GLenum usage)
-        __attribute__((alias("glBufferData")));
-    GLAPI GLAPIENTRY GLboolean glUnmapBufferARB(GLenum target) __attribute__((alias("glUnmapBuffer")));
-    GLAPI GLAPIENTRY void glBufferStorageARB(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags)
-        __attribute__((alias("glBufferStorage")));
-    GLAPI GLAPIENTRY void glBindBufferARB(GLenum target, GLuint buffer) __attribute__((alias("glBindBuffer")));
-}
-
-void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
-    LOG()
-    if (global_settings.buffer_coherent_as_flush) access &= ~GL_MAP_FLUSH_EXPLICIT_BIT;
-    //    access |= GL_MAP_UNSYNCHRONIZED_BIT;
-    return GLES.glMapBufferRange(target, offset, length, access);
-}
-
-GLboolean glUnmapBuffer(GLenum target) {
-    LOG()
-    LOG_D("%s(%s)", __func__, glEnumToString(target));
-    if (g_gles_caps.GL_OES_mapbuffer) return GLES.glUnmapBuffer(target);
-
-    GLboolean result = GLES.glUnmapBuffer(target);
-    CHECK_GL_ERROR
-    return result;
-}
-
-void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags) {
-    LOG()
-    if (GLES.glBufferStorageEXT) {
-        if (global_settings.buffer_coherent_as_flush &&
-            ((flags & GL_MAP_PERSISTENT_BIT) != 0 || (flags & GL_DYNAMIC_STORAGE_BIT) != 0))
-            flags |= (GL_MAP_WRITE_BIT | GL_MAP_COHERENT_BIT | GL_MAP_PERSISTENT_BIT);
-        GLES.glBufferStorageEXT(target, size, data, flags);
-    }
-    CHECK_GL_ERROR
-}
-
-void glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
-    LOG()
-    if (!global_settings.buffer_coherent_as_flush) GLES.glFlushMappedBufferRange(target, offset, length);
-}
+// ============================================================================
+// Vertex Array Object Lifecycle (ES 3.2 native, with VAO map)
+// ============================================================================
 
 void glGenVertexArrays(GLsizei n, GLuint* arrays) {
     LOG()
@@ -832,4 +829,24 @@ void glBindVertexArray(GLuint array) {
     LOG_D("glBindVertexArray: %d -> %d", array, real_array)
     GLES.glBindVertexArray(real_array);
     CHECK_GL_ERROR
+}
+
+// ============================================================================
+// ARB Aliases
+// ============================================================================
+
+#if GLOBAL_DEBUG || DEBUG
+#include <fstream>
+#define BIN_FILE_PREFIX "/sdcard/MG/buf/"
+#endif
+
+extern "C"
+{
+    GLAPI GLAPIENTRY void* glMapBufferARB(GLenum target, GLenum access) __attribute__((alias("glMapBuffer")));
+    GLAPI GLAPIENTRY void glBufferDataARB(GLenum target, GLsizeiptr size, const void* data, GLenum usage)
+        __attribute__((alias("glBufferData")));
+    GLAPI GLAPIENTRY GLboolean glUnmapBufferARB(GLenum target) __attribute__((alias("glUnmapBuffer")));
+    GLAPI GLAPIENTRY void glBufferStorageARB(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags)
+        __attribute__((alias("glBufferStorage")));
+    GLAPI GLAPIENTRY void glBindBufferARB(GLenum target, GLuint buffer) __attribute__((alias("glBindBuffer")));
 }
