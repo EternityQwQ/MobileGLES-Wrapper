@@ -72,8 +72,8 @@ extern "C"
     GLAPI GLAPIENTRY void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GLsizei drawcount);
     GLAPI GLAPIENTRY void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                                               const void* const* indices, GLsizei primcount);
-    GLAPI GLAPIENTRY void glMultiDrawElementsBaseVertex(GLenum mode, GLsizei* counts, GLenum type,
-                                                        const void* const* indices, GLsizei primcount,
+    GLAPI GLAPIENTRY void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum type,
+                                                        const void* const* indices, GLsizei drawcount,
                                                         const GLint* basevertex);
 
     // ============================================================================

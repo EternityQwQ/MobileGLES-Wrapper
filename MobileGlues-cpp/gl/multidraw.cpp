@@ -86,9 +86,9 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type, const v
 //   simulation.
 // =============================================================================
 
-typedef void (*glMultiDrawElementsBaseVertex_t)(GLenum, GLsizei*, GLenum, const void* const*, GLsizei, const GLint*);
+typedef void (*glMultiDrawElementsBaseVertex_t)(GLenum, const GLsizei*, GLenum, const void* const*, GLsizei, const GLint*);
 
-void glMultiDrawElementsBaseVertex(GLenum mode, GLsizei* counts, GLenum type, const void* const* indices,
+void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* counts, GLenum type, const void* const* indices,
                                    GLsizei primcount, const GLint* basevertex) {
     static glMultiDrawElementsBaseVertex_t func_ptr = nullptr;
 
@@ -215,7 +215,7 @@ void mg_glMultiDrawElements_drawelements(GLenum mode, const GLsizei* count, GLen
     CHECK_GL_ERROR
 }
 
-void mg_glMultiDrawElementsBaseVertex_drawelements(GLenum mode, GLsizei* counts, GLenum type,
+void mg_glMultiDrawElementsBaseVertex_drawelements(GLenum mode, const GLsizei* counts, GLenum type,
                                                    const void* const* indices, GLsizei primcount,
                                                    const GLint* basevertex) {
     LOG()
@@ -330,7 +330,7 @@ void mg_glMultiDrawElements_indirect(GLenum mode, const GLsizei* count, GLenum t
     CHECK_GL_ERROR
 }
 
-void mg_glMultiDrawElementsBaseVertex_indirect(GLenum mode, GLsizei* counts, GLenum type, const void* const* indices,
+void mg_glMultiDrawElementsBaseVertex_indirect(GLenum mode, const GLsizei* counts, GLenum type, const void* const* indices,
                                                GLsizei primcount, const GLint* basevertex) {
     LOG()
     void prepareForDraw();
@@ -368,7 +368,7 @@ void mg_glMultiDrawElements_multiindirect(GLenum mode, const GLsizei* count, GLe
     CHECK_GL_ERROR
 }
 
-void mg_glMultiDrawElementsBaseVertex_multiindirect(GLenum mode, GLsizei* counts, GLenum type,
+void mg_glMultiDrawElementsBaseVertex_multiindirect(GLenum mode, const GLsizei* counts, GLenum type,
                                                     const void* const* indices, GLsizei primcount,
                                                     const GLint* basevertex) {
     LOG()
@@ -405,7 +405,7 @@ void mg_glMultiDrawElements_basevertex(GLenum mode, const GLsizei* count, GLenum
     CHECK_GL_ERROR
 }
 
-void mg_glMultiDrawElementsBaseVertex_basevertex(GLenum mode, GLsizei* counts, GLenum type, const void* const* indices,
+void mg_glMultiDrawElementsBaseVertex_basevertex(GLenum mode, const GLsizei* counts, GLenum type, const void* const* indices,
                                                  GLsizei primcount, const GLint* basevertex) {
     LOG()
     void prepareForDraw();
@@ -613,7 +613,7 @@ static GLuint compile_compute_program(const std::string& src) {
 //   Falls back to DrawElements for strip-like modes.
 // =============================================================================
 
-GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsizei* counts, GLenum type,
+GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, const GLsizei* counts, GLenum type,
                                                                const void* const* indices, GLsizei primcount,
                                                                const GLint* basevertex) {
     LOG()
