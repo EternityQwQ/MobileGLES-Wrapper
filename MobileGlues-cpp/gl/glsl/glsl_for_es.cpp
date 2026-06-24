@@ -6,14 +6,22 @@
 // End of Source File Header
 
 // ============================================================================
-// GLSL → SPIR-V → GLSL ES  Converter (EshClientOpenGL + spirv-cross)
+// GLSL → SPIR-V → GLSL ES Converter (EShClientOpenGL + spirv-cross)
 // ============================================================================
 //
-// Pipeline:
-//   1. Preprocess  – strip #line, upgrade legacy syntax, inject Iris macros
-//   2. glslang      – parse desktop GLSL as EShClientOpenGL, emit SPIR-V 1.5
-//   3. spirv-cross  – consume SPIR-V, emit GLSL ES 3.2
-//   4. Post-process – remove layout(binding), fix precision, add extensions
+// Architecture:
+//   Stage 1: Preprocess   – strip #line, upgrade legacy syntax, inject Iris macros
+//   Stage 2: glslang      – parse desktop GLSL as EShClientOpenGL, emit SPIR-V 1.5
+//   Stage 3: spirv-cross  – consume SPIR-V, emit GLSL ES 3.2 (ESSL 320)
+//   Stage 4: Post-process – remove layout(binding), fix precision, add extensions
+//
+// Key design decisions:
+//   - EShClientOpenGL is used for BOTH setEnvInput and setEnvClient
+//     This tells glslang to parse OpenGL GLSL semantics (not Vulkan)
+//   - EShMsgSpvRules ensures SPIR-V is generated with OpenGL-style I/O mapping
+//   - Auto-map locations/bindings enabled for OpenGL compatibility
+//   - Target: OpenGL ES 3.2 (ESSL 320) with required extensions
+//   - SPIR-V 1.5 with relaxed Vulkan rules for maximum compatibility
 //
 // Target: OpenGL ES 3.2
 // ============================================================================
@@ -41,10 +49,26 @@
 
 #define DEBUG 0
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+// Watermark inserted when atomic counters are converted to SSBOs
 const char* atomicCounterEmulatedWatermark = "// Non-opaque atomic uniform converted to SSBO";
+
+// Supported EShTargetOpenGL versions for fallback
+// glslang currently only supports EShTargetOpenGL_450 for OpenGL client
+static const int k_opengl_version_fallbacks[] = {450, 440, 430, 420, 410, 400, 330};
+
+// Target ESSL version (always ES 3.2)
+static const uint k_target_essl_version = 320;
+
+// Target SPIR-V version
+static const glslang::EShTargetSpv k_target_spv = glslang::EShTargetSpv_1_5;
+
+// ============================================================================
+// Section 2: Version Mapping
+// ============================================================================
 
 // Map desktop GLSL version → glslang EShTargetOpenGL version
 // glslang only supports these discrete versions for OpenGL client
@@ -62,15 +86,23 @@ static int map_glsl_to_opengl_version(int glsl_version) {
     return 330; // minimum for core profile
 }
 
-// Map desktop GLSL version → ESSL version (always ES 3.2)
-static int map_glsl_to_essl_version(int glsl_version) {
-    (void)glsl_version;
-    return 320;
+// Map GLSL version to EShTargetOpenGL_* enum
+static EShTargetClientVersion glsl_version_to_target(int glsl_version) {
+    if (glsl_version >= 450) return EShTargetOpenGL_450;
+    if (glsl_version >= 440) return EShTargetOpenGL_440;
+    if (glsl_version >= 430) return EShTargetOpenGL_430;
+    if (glsl_version >= 420) return EShTargetOpenGL_420;
+    if (glsl_version >= 410) return EShTargetOpenGL_410;
+    if (glsl_version >= 400) return EShTargetOpenGL_400;
+    if (glsl_version >= 330) return EShTargetOpenGL_330;
+    if (glsl_version >= 150) return EShTargetOpenGL_150;
+    return EShTargetOpenGL_450; // default: use the highest supported
 }
 
-// ---------------------------------------------------------------------------
-// Resource limits for glslang
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 3: Resource Limits
+// ============================================================================
+
 static TBuiltInResource InitResources() {
     TBuiltInResource Resources{};
 
@@ -180,9 +212,11 @@ static TBuiltInResource InitResources() {
     return Resources;
 }
 
-// ---------------------------------------------------------------------------
-// Utility helpers
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 4: Utility Functions
+// ============================================================================
+
+// Extract #version from GLSL source
 int getGLSLVersion(const char* glsl_code) {
     std::string code(glsl_code);
     static std::regex version_pattern(R"(#version\s+(\d{3}))");
@@ -193,6 +227,7 @@ int getGLSLVersion(const char* glsl_code) {
     return -1;
 }
 
+// Replace all occurrences of a substring in-place
 static inline void replace_all(std::string& str, const std::string& from, const std::string& to) {
     size_t start_pos = 0;
     while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
@@ -201,11 +236,12 @@ static inline void replace_all(std::string& str, const std::string& from, const 
     }
 }
 
+// Replace all occurrences matching a regex pattern in-place
 static inline void replace_all_regex(std::string& str, const std::regex& pattern, const std::string& replacement) {
     str = std::regex_replace(str, pattern, replacement);
 }
 
-// Find insertion point after #version and #extension directives
+// Find insertion point after #version, #extension, and whitespace
 static size_t find_insertion_point(const std::string& glsl) {
     size_t pos = 0;
     size_t insertion_point = 0;
@@ -253,6 +289,7 @@ static size_t find_insertion_point(const std::string& glsl) {
     return insertion_point;
 }
 
+// Remove all lines that start with a given prefix
 std::string replace_line_starting_with(const std::string& glslCode, const std::string& starting,
                                        const std::string& substitution = "") {
     std::string result;
@@ -304,22 +341,20 @@ std::string replace_line_starting_with(const std::string& glslCode, const std::s
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// Legacy GLSL → Modern GLSL transformations
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 5: Legacy GLSL → Modern GLSL Transformations
+// ============================================================================
 
-// Detect if the shader uses compatibility profile
 static bool is_compatibility_profile(const std::string& glsl) {
     return glsl.find("compatibility") != std::string::npos;
 }
 
-// Strip "compatibility" from #version 1xx compatibility
 static std::string strip_compatibility_profile(const std::string& glsl) {
     static std::regex compat_regex(R"(#version\s+(\d+)\s+compatibility)");
     return std::regex_replace(glsl, compat_regex, "#version $1 core");
 }
 
-// Replace legacy texture functions with modern equivalents (in-place)
+// Replace legacy texture functions with modern equivalents
 static void upgrade_texture_functions(std::string& result) {
     replace_all(result, "texture2D(", "texture(");
     replace_all(result, "texture2DArray(", "texture(");
@@ -341,7 +376,7 @@ static void handle_glTextureMatrix(std::string& result) {
     }
 }
 
-// Remove or comment out unsupported #extension directives (in-place)
+// Clean unsupported #extension directives
 static void clean_extensions(std::string& result) {
     static const std::vector<std::string> unsupported_extensions = {
         "GL_ARB_compatibility",
@@ -355,52 +390,11 @@ static void clean_extensions(std::string& result) {
     }
 }
 
-// Handle Iris-specific gl_FragData usage patterns
-static std::string handle_iris_fragdata(const std::string& glsl) {
-    std::string result = glsl;
+// ============================================================================
+// Section 6: ESSL Post-processing
+// ============================================================================
 
-    // Iris shaders often use gl_FragData[n] for MRT output
-    // glslang with EShClientOpenGL should handle this via auto-map-locations
-    // but we need to ensure EShMsgSpvRules is set
-
-    // Handle Iris-specific gl_FragColor as well
-    // Both are handled by glslang's compatibility mapping
-
-    return result;
-}
-
-// Handle Iris-specific preprocessor guards
-static std::string handle_iris_guards(const std::string& glsl) {
-    std::string result = glsl;
-
-    // Iris shaders use #ifdef MC_GL_RENDERER and similar patterns
-    // These guards reference platform-specific renderer types
-    // MobileGlues defines MC_MOBILEGLUES and IS_IRIS, so we handle those
-
-    // Some Iris shaders use #ifdef MC_GL_VENDOR_INTEL, etc.
-    // These are fine since we enable all Iris paths via macros
-
-    // Comment out #extension directives that are Iris-specific but not needed for GLSL ES
-    static const std::vector<std::string> iris_extensions = {
-        "GL_ARB_shader_image_load_store",
-        "GL_ARB_shader_image_size",
-        "GL_ARB_shading_language_420pack",
-        "GL_ARB_compute_shader",
-        "GL_ARB_gpu_shader5",
-        "GL_ARB_shader_storage_buffer_object",
-    };
-
-    for (const auto& ext : iris_extensions) {
-        // These are fine in desktop GLSL → they'll be handled by the conversion
-        // We don't remove them, glslang knows about them
-    }
-
-    return result;
-}
-
-// ---------------------------------------------------------------------------
-// ESSL Post-processing
-// ---------------------------------------------------------------------------
+// Ensure precision qualifiers are present in the output
 std::string forceSupporterOutput(const std::string& glslCode) {
     bool hasPrecisionFloat =
         glslCode.find("precision ") != std::string::npos && glslCode.find("float;") != std::string::npos;
@@ -412,7 +406,7 @@ std::string forceSupporterOutput(const std::string& glslCode) {
     std::string precisionInt;
 
     if (hasPrecisionFloat && hasPrecisionInt) {
-        // Remove existing precision declarations, re-add as highp
+        // Remove existing precision, re-add as highp at the top
         std::istringstream iss(result);
         std::vector<std::string> lines;
         std::string line;
@@ -459,13 +453,8 @@ std::string forceSupporterOutput(const std::string& glslCode) {
     return result;
 }
 
-// Remove layout(binding=N) from spirv-cross output, since GLES may not support
-// it on all targets.  Single-pass linear scan that handles:
-//   layout(binding=N)          → (remove entirely)
-//   layout(binding=N, X)       → layout(X)
-//   layout(X, binding=N)       → layout(X)
-//   layout(X, binding=N, Y)    → layout(X, Y)
-// Note: only called for non-compute shaders; compute may legitimately need bindings.
+// Remove layout(binding=N) from spirv-cross output (non-compute only)
+// Handles: layout(binding=N) → (remove), layout(binding=N, X) → layout(X), etc.
 std::string removeLayoutBinding(const std::string& glslCode) {
     std::string result;
     result.reserve(glslCode.size());
@@ -473,9 +462,7 @@ std::string removeLayoutBinding(const std::string& glslCode) {
     const size_t n = glslCode.size();
 
     while (i < n) {
-        // Find start of "layout("
         if (glslCode.compare(i, 7, "layout(") == 0) {
-            // Find matching ')'
             size_t start = i;
             size_t depth = 1;
             size_t j = i + 7;
@@ -484,21 +471,17 @@ std::string removeLayoutBinding(const std::string& glslCode) {
                 else if (glslCode[j] == ')') depth--;
                 j++;
             }
-            // j is now past the closing ')'
             std::string inner = glslCode.substr(start + 7, j - start - 8);
 
-            // Remove "binding = N" and any dangling commas
             static std::regex binding_rx(R"(\s*binding\s*=\s*\d+\s*,?\s*)");
             inner = std::regex_replace(inner, binding_rx, "");
 
-            // Trim leading/trailing commas and whitespace
             while (!inner.empty() && (inner.front() == ',' || inner.front() == ' '))
                 inner.erase(0, 1);
             while (!inner.empty() && (inner.back() == ',' || inner.back() == ' '))
                 inner.pop_back();
 
             if (inner.empty()) {
-                // Entire layout() was just binding=N — skip it and trailing whitespace
                 while (j < n && (glslCode[j] == ' ' || glslCode[j] == '\t' || glslCode[j] == '\n'))
                     j++;
             } else {
@@ -513,36 +496,23 @@ std::string removeLayoutBinding(const std::string& glslCode) {
     return result;
 }
 
+// Add layout(location=N) to outColorN declarations
 std::string processOutColorLocations(const std::string& glslCode) {
-    // Add layout(location=N) to outColorN declarations
     const static std::regex pattern(R"(\n(out\s+(?:highp\s+|mediump\s+|lowp\s+)?vec4\s+outColor)(\d+);)");
     const std::string replacement = "\nlayout(location=$2) $1$2;";
     return std::regex_replace(glslCode, pattern, replacement);
 }
 
-// Process all uniform declarations into `uniform <precision> <type> <name>;` form
-// Strips initializers since ESSL doesn't allow them on uniforms.
-//
-// WARNING: This is a best-effort string-level parser with known limitations:
-//   - Does NOT handle comments (e.g. uniform float f = /* 1.0 */ 0.5;)
-//   - Does NOT handle string literals containing '=' or ';'
-//   - Does NOT handle nested parentheses in initializers
-//   - Does NOT handle multi-line declarations
-//   - is_block detection uses naive '{' before ';' search (false positive on arrays)
-// It is designed for known input patterns (spirv-cross output, Iris shaders).
-// A long-term solution should use glslang AST traversal instead.
+// Process uniform declarations: strip initializers (ES doesn't allow them)
 std::string process_uniform_declarations(const std::string& glslCode) {
     std::string result;
     size_t scan_pos = 0;
     const size_t length = glslCode.length();
-    const std::vector<std::string> precision_kws = {"highp", "lowp", "mediump"};
 
     result.reserve(glslCode.length() + 256);
 
     while (scan_pos < length) {
-        // Check if we're at a "uniform" keyword start
         if (glslCode.compare(scan_pos, 7, "uniform") == 0) {
-            // Make sure it's a word boundary
             if (scan_pos + 7 < length && std::isalnum(glslCode[scan_pos + 7])) {
                 result += glslCode[scan_pos];
                 ++scan_pos;
@@ -554,27 +524,21 @@ std::string process_uniform_declarations(const std::string& glslCode) {
                 continue;
             }
 
-            // Find the semicolon that ends this declaration
             size_t decl_end = glslCode.find(';', scan_pos);
             if (decl_end == std::string::npos) {
                 result.append(glslCode, scan_pos, length - scan_pos);
                 break;
             }
-            ++decl_end; // include the semicolon
+            ++decl_end;
 
-            // Check if there's an initializer (=) between scan_pos and decl_end
-            // (before any potential opening brace for struct/array)
             size_t eq_pos = glslCode.find('=', scan_pos);
             bool has_initializer = (eq_pos != std::string::npos && eq_pos < decl_end);
 
-            // Also check for block declarations (uniform BlockName { ... };)
             size_t brace_pos = glslCode.find('{', scan_pos);
             bool is_block = (brace_pos != std::string::npos && brace_pos < decl_end);
 
             if (has_initializer && !is_block) {
-                // Extract the declaration without initializer
                 std::string decl = glslCode.substr(scan_pos, eq_pos - scan_pos);
-                // Trim trailing whitespace
                 while (!decl.empty() && std::isspace(decl.back()))
                     decl.pop_back();
                 result += decl + ";\n";
@@ -592,9 +556,10 @@ std::string process_uniform_declarations(const std::string& glslCode) {
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// Atomic counter → SSBO emulation
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 7: Atomic Counter → SSBO Emulation
+// ============================================================================
+
 bool process_non_opaque_atomic_to_ssbo(std::string& source) {
     if (source.find("atomicCounter") == std::string::npos) return false;
 
@@ -674,20 +639,19 @@ bool process_non_opaque_atomic_to_ssbo(std::string& source) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Sampler buffer emulation
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 8: Sampler Buffer Emulation
+// ============================================================================
+
 void process_sampler_buffer(std::string& source) {
     if (source.find("isamplerBuffer") == std::string::npos &&
         source.find("samplerBuffer") == std::string::npos) {
         return;
     }
 
-    // Collect sampler names during type replacement, so we only transform
-    // texelFetch calls for variables that were actually declared as samplerBuffer.
     std::set<std::string> buffer_samplers;
 
-    // Replace samplerBuffer types
+    // Replace samplerBuffer types with sampler2D equivalents
     size_t pos = 0;
     while ((pos = source.find("isamplerBuffer", pos)) != std::string::npos) {
         source.replace(pos, 14, "isampler2D");
@@ -695,7 +659,6 @@ void process_sampler_buffer(std::string& source) {
     }
     pos = 0;
     while ((pos = source.find("samplerBuffer", pos)) != std::string::npos) {
-        // Don't match "isamplerBuffer" or "usamplerBuffer"
         if (pos > 0 && (source[pos - 1] == 'i' || source[pos - 1] == 'u')) {
             pos += 13;
             continue;
@@ -704,7 +667,7 @@ void process_sampler_buffer(std::string& source) {
         pos += 10;
     }
 
-    // Extract sampler variable names from declarations like "uniform sampler2D name;"
+    // Extract sampler variable names from declarations
     {
         std::regex sampler_decl(R"(uniform\s+(?:i)?sampler2D\s+(\w+)\s*;)");
         auto it = std::sregex_iterator(source.begin(), source.end(), sampler_decl);
@@ -714,11 +677,8 @@ void process_sampler_buffer(std::string& source) {
         }
     }
 
-    // Replace texelFetch with bufferCoords helper.
-    // NOTE: Best-effort string transform with known limitations:
-    //   - Does not handle macro-expanded texelFetch (e.g. #define FETCH texelFetch)
-    //   - Does not handle samplerBuffer accessed through struct members
-    //   - Only transforms calls where the sampler name was detected above
+    // Replace texelFetch with bufferCoords helper using manual parenthesis-matching parser.
+    // This handles nested parentheses in index expressions (fix for Sodium 0.9.x).
     {
         std::string result;
         result.reserve(source.size() * 2);
@@ -795,10 +755,6 @@ void process_sampler_buffer(std::string& source) {
     }
 
     // Inject helper function and uniforms
-    // NOTE: The helper maps a 1D buffer index to 2D texture coordinates.
-    // No bounds checking is performed — the caller must ensure u_BufferTexWidth
-    // and u_BufferTexHeight are correctly set to cover the entire buffer range.
-    // Out-of-bounds access results in undefined behavior (same as desktop GLSL).
     const char* boundaryProtection = R"(
 ivec2 bufferCoords(int index) {
     return ivec2(index % u_BufferTexWidth, index / u_BufferTexWidth);
@@ -824,9 +780,10 @@ uniform int u_BufferTexHeight;
     }
 }
 
-// ---------------------------------------------------------------------------
-// Feature injections
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 9: Feature Injections
+// ============================================================================
+
 static void inject_textureQueryLod(std::string& glsl) {
     const std::regex defRegex(R"(vec2\s+mg_textureQueryLod\s*\()", std::regex::ECMAScript);
 
@@ -904,6 +861,7 @@ vec4 GI_TemporalFilter() {
 #define xstr(s) str(s)
 #define str(s) #s
 
+// Inject MobileGlues and Iris macros for platform detection
 void inject_mg_macro_definition(std::string& glslCode) {
     std::string macro_definitions =
         "\n#define MG_MOBILEGLUES\n"
@@ -927,13 +885,15 @@ void inject_mg_macro_definition(std::string& glslCode) {
     glslCode.insert(insertionPos, macro_definitions);
 }
 
-// ---------------------------------------------------------------------------
-// Preprocessing pipeline
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 10: Preprocessing Pipeline
+// ============================================================================
+
+// Stage 1: Transform desktop GLSL into a form that glslang can parse as EShClientOpenGL
 std::string preprocess_glsl(const std::string& glsl, GLenum shaderType, bool* atomicCounterEmulated) {
     std::string ret = glsl;
 
-    // Step 1: Remove #line directives (they confuse glslang version detection)
+    // Step 1: Remove #line directives (confuse glslang version detection)
     ret = replace_line_starting_with(ret, "#line");
 
     // Step 2: Strip compatibility profile → core profile
@@ -942,7 +902,6 @@ std::string preprocess_glsl(const std::string& glsl, GLenum shaderType, bool* at
     }
 
     // Step 3: Upgrade legacy texture functions, handle gl_TextureMatrix, clean extensions
-    // (merged into a single in-place mutation block to reduce string copies)
     upgrade_texture_functions(ret);
     handle_glTextureMatrix(ret);
     clean_extensions(ret);
@@ -977,20 +936,20 @@ std::string preprocess_glsl(const std::string& glsl, GLenum shaderType, bool* at
     return ret;
 }
 
-// ---------------------------------------------------------------------------
-// Version handling
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 11: Version Handling
+// ============================================================================
+
+// Normalize GLSL version: ensure #version is present and at least 330 core
 int get_or_add_glsl_version(std::string& glsl) {
     int glsl_version = getGLSLVersion(glsl.c_str());
     if (glsl_version == -1) {
         glsl_version = 330;
         glsl.insert(0, "#version 330 core\n");
     } else if (glsl_version < 140) {
-        // Force upgrade to at least GLSL 330 core for EShClientOpenGL compatibility
         glsl = replace_line_starting_with(glsl, "#version", "#version 330 core\n");
         glsl_version = 330;
     } else if (glsl_version < 330) {
-        // Upgrade to at least 330 for core profile features
         static std::regex version_regex(R"(#version\s+\d+(\s+\w+)?)");
         glsl = std::regex_replace(glsl, version_regex, "#version 330 core");
         glsl_version = 330;
@@ -1007,121 +966,166 @@ int get_or_add_glsl_version(std::string& glsl) {
     return glsl_version;
 }
 
-// ---------------------------------------------------------------------------
-// GLSL → SPIR-V (glslang with EShClientOpenGL)
-// ---------------------------------------------------------------------------
-std::vector<unsigned int> glsl_to_spirv(GLenum shader_type, int glsl_version, const char* const* shader_src,
-                                        int& errc) {
-    EShLanguage shader_language;
+// ============================================================================
+// Section 12: Stage 2 — GLSL → SPIR-V (glslang with EShClientOpenGL)
+// ============================================================================
+
+// Map GLenum shader type to glslang EShLanguage
+static EShLanguage glenum_to_esh_language(GLenum shader_type) {
     switch (shader_type) {
-    case GL_VERTEX_SHADER:
-        shader_language = EShLanguage::EShLangVertex;
-        break;
-    case GL_FRAGMENT_SHADER:
-        shader_language = EShLanguage::EShLangFragment;
-        break;
-    case GL_COMPUTE_SHADER:
-        shader_language = EShLanguage::EShLangCompute;
-        break;
-    case GL_TESS_CONTROL_SHADER:
-        shader_language = EShLanguage::EShLangTessControl;
-        break;
-    case GL_TESS_EVALUATION_SHADER:
-        shader_language = EShLanguage::EShLangTessEvaluation;
-        break;
-    case GL_GEOMETRY_SHADER:
-        shader_language = EShLanguage::EShLangGeometry;
-        break;
-    default:
-        LOG_D("GLSL type not supported!")
-        errc = -1;
-        return {};
+    case GL_VERTEX_SHADER:          return EShLanguage::EShLangVertex;
+    case GL_FRAGMENT_SHADER:        return EShLanguage::EShLangFragment;
+    case GL_COMPUTE_SHADER:         return EShLanguage::EShLangCompute;
+    case GL_TESS_CONTROL_SHADER:    return EShLanguage::EShLangTessControl;
+    case GL_TESS_EVALUATION_SHADER: return EShLanguage::EShLangTessEvaluation;
+    case GL_GEOMETRY_SHADER:        return EShLanguage::EShLangGeometry;
+    default:                        return EShLanguage::EShLangCount; // invalid
     }
+}
 
-    glslang::TShader shader(shader_language);
-    shader.setStrings(shader_src, 1);
-
+// Configure glslang TShader for EShClientOpenGL parsing
+static void configure_shader_for_opengl(glslang::TShader& shader, EShLanguage shader_language,
+                                        int glsl_version, int target_gl_version) {
     using namespace glslang;
 
-    int target_gl_version = map_glsl_to_opengl_version(glsl_version);
-
-    // Configure for OpenGL client (not Vulkan)
-    // This is the key: EShClientOpenGL tells glslang to parse OpenGL GLSL semantics
+    // KEY: Set input to EShClientOpenGL so glslang parses OpenGL GLSL semantics
     shader.setEnvInput(EShSourceGlsl, shader_language, EShClientOpenGL, target_gl_version);
 
-    // Map to the appropriate EShTargetOpenGL version
-    // NOTE: newer glslang only supports EShTargetOpenGL_450 as the sole OpenGL client version
-    EShTargetClientVersion target_gl = EShTargetOpenGL_450;
+    // Set client to OpenGL (not Vulkan)
+    EShTargetClientVersion target_gl = glsl_version_to_target(target_gl_version);
     shader.setEnvClient(EShClientOpenGL, target_gl);
-    shader.setEnvTarget(EShTargetSpv, EShTargetSpv_1_5);
+
+    // Output SPIR-V 1.5
+    shader.setEnvTarget(EShTargetSpv, k_target_spv);
 
     // Auto-map locations and bindings for OpenGL compatibility
     shader.setAutoMapLocations(true);
     shader.setAutoMapBindings(true);
 
-    // Enable relaxed rules for Vulkan-style SPIR-V generation
+    // Relaxed rules for maximum compatibility with Iris shaders
     shader.setEnvInputVulkanRulesRelaxed();
+
+    // Binding shift offsets (start from 0 for OpenGL)
     shader.setShiftSamplerBinding(0);
     shader.setShiftTextureBinding(0);
     shader.setShiftImageBinding(0);
     shader.setShiftUboBinding(0);
     shader.setShiftSsboBinding(0);
     shader.setShiftUavBinding(0);
+
     shader.setNoStorageFormat(false);
     shader.setNanMinMaxClamp(false);
+}
 
-    TBuiltInResource TBuiltInResource_resources = InitResources();
-
-    // Use EShMsgSpvRules for SPIR-V generation with OpenGL semantics
-    EShMessages messages = EShMsgDefault;
-    messages = (EShMessages)(messages | EShMsgSpvRules);
-
-    if (!shader.parse(&TBuiltInResource_resources, target_gl_version, true, messages)) {
-        LOG_D("GLSL Compiling ERROR (v%d): \n%s", target_gl_version, shader.getInfoLog())
-
-        // Retry with higher version (460 → 450)
-        if (target_gl_version < 450) {
-            int retry_version = 450;
-            EShTargetClientVersion retry_target = EShTargetOpenGL_450;
-            shader.setEnvInput(EShSourceGlsl, shader_language, EShClientOpenGL, retry_version);
-            shader.setEnvClient(EShClientOpenGL, retry_target);
-
-            if (!shader.parse(&TBuiltInResource_resources, retry_version, true, messages)) {
-                LOG_D("GLSL Compiling ERROR (retry v%d): \n%s", retry_version, shader.getInfoLog())
-                errc = -1;
-                return {};
-            }
-            LOG_D("GLSL Compiled (retry v%d succeeded).", retry_version)
-        } else {
-            errc = -1;
-            return {};
-        }
-    } else {
-        LOG_D("GLSL Compiled (v%d).", target_gl_version)
-    }
-
-    glslang::TProgram program;
-    program.addShader(&shader);
-
-    if (!program.link(messages)) {
-        LOG_D("Shader Linking ERROR: %s", program.getInfoLog())
+// Compile GLSL to SPIR-V using glslang with EShClientOpenGL
+// Tries multiple version strategies if the initial attempt fails
+std::vector<unsigned int> glsl_to_spirv(GLenum shader_type, int glsl_version, const char* const* shader_src,
+                                        int& errc) {
+    EShLanguage shader_language = glenum_to_esh_language(shader_type);
+    if (shader_language == EShLanguage::EShLangCount) {
+        LOG_D("GLSL type not supported! type=%d", shader_type)
         errc = -1;
         return {};
     }
-    LOG_D("Shader Linked.")
 
-    std::vector<unsigned int> spirv_code;
-    glslang::SpvOptions spvOptions;
-    spvOptions.disableOptimizer = false;
-    spvOptions.validate = true;
-    glslang::GlslangToSpv(*program.getIntermediate(shader_language), spirv_code, &spvOptions);
-    errc = 0;
-    return spirv_code;
+    using namespace glslang;
+    TBuiltInResource resources = InitResources();
+
+    // Use SpvRules for proper SPIR-V generation with OpenGL semantics
+    EShMessages messages = (EShMessages)(EShMsgDefault | EShMsgSpvRules);
+
+    int target_gl_version = map_glsl_to_opengl_version(glsl_version);
+
+    // Strategy 1: Try with the mapped version
+    {
+        glslang::TShader shader(shader_language);
+        shader.setStrings(shader_src, 1);
+        configure_shader_for_opengl(shader, shader_language, glsl_version, target_gl_version);
+
+        if (shader.parse(&resources, target_gl_version, true, messages)) {
+            LOG_D("GLSL Compiled (v%d).", target_gl_version)
+
+            glslang::TProgram program;
+            program.addShader(&shader);
+
+            if (program.link(messages)) {
+                LOG_D("Shader Linked.")
+                std::vector<unsigned int> spirv_code;
+                glslang::SpvOptions spvOptions;
+                spvOptions.disableOptimizer = false;
+                spvOptions.validate = true;
+                glslang::GlslangToSpv(*program.getIntermediate(shader_language), spirv_code, &spvOptions);
+                errc = 0;
+                return spirv_code;
+            }
+            LOG_D("Shader Linking ERROR: %s", program.getInfoLog())
+        }
+        LOG_D("GLSL Compiling ERROR (v%d): \n%s", target_gl_version, shader.getInfoLog())
+    }
+
+    // Strategy 2: Retry with version 450 (the highest glslang supports for OpenGL client)
+    if (target_gl_version < 450) {
+        glslang::TShader shader(shader_language);
+        shader.setStrings(shader_src, 1);
+        configure_shader_for_opengl(shader, shader_language, glsl_version, 450);
+
+        if (shader.parse(&resources, 450, true, messages)) {
+            LOG_D("GLSL Compiled (retry v450).")
+
+            glslang::TProgram program;
+            program.addShader(&shader);
+
+            if (program.link(messages)) {
+                LOG_D("Shader Linked (retry).")
+                std::vector<unsigned int> spirv_code;
+                glslang::SpvOptions spvOptions;
+                spvOptions.disableOptimizer = false;
+                spvOptions.validate = true;
+                glslang::GlslangToSpv(*program.getIntermediate(shader_language), spirv_code, &spvOptions);
+                errc = 0;
+                return spirv_code;
+            }
+            LOG_D("Shader Linking ERROR (retry): %s", program.getInfoLog())
+        }
+        LOG_D("GLSL Compiling ERROR (retry v450): \n%s", shader.getInfoLog())
+    }
+
+    // Strategy 3: Retry without EShMsgSpvRules (looser rules)
+    {
+        glslang::TShader shader(shader_language);
+        shader.setStrings(shader_src, 1);
+        configure_shader_for_opengl(shader, shader_language, glsl_version, 450);
+
+        EShMessages loose_messages = EShMsgDefault;
+        if (shader.parse(&resources, 450, true, loose_messages)) {
+            LOG_D("GLSL Compiled (loose rules).")
+
+            glslang::TProgram program;
+            program.addShader(&shader);
+
+            if (program.link(loose_messages)) {
+                LOG_D("Shader Linked (loose rules).")
+                std::vector<unsigned int> spirv_code;
+                glslang::SpvOptions spvOptions;
+                spvOptions.disableOptimizer = false;
+                spvOptions.validate = false;
+                glslang::GlslangToSpv(*program.getIntermediate(shader_language), spirv_code, &spvOptions);
+                errc = 0;
+                return spirv_code;
+            }
+            LOG_D("Shader Linking ERROR (loose): %s", program.getInfoLog())
+        }
+        LOG_D("GLSL Compiling ERROR (loose): \n%s", shader.getInfoLog())
+    }
+
+    errc = -1;
+    return {};
 }
 
-// ---------------------------------------------------------------------------
-// SPIR-V → GLSL ES (spirv-cross)
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 13: Stage 3 — SPIR-V → GLSL ES (spirv-cross)
+// ============================================================================
+
 std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, GLenum shader_type, int& errc) {
     spvc_context context = nullptr;
     spvc_parsed_ir ir = nullptr;
@@ -1133,9 +1137,15 @@ std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, GL
     size_t word_count = spirv.size();
 
     LOG_D("spirv_code.size(): %zu", spirv.size())
-    spvc_context_create(&context);
+
+    if (spvc_context_create(&context) != SPVC_SUCCESS) {
+        LOG_E("spirv-cross: Failed to create context")
+        errc = -1;
+        return "";
+    }
+
     if (spvc_context_parse_spirv(context, p_spirv, word_count, &ir) != SPVC_SUCCESS) {
-        LOG_E("spirv-cross: Failed to parse SPIR-V")
+        LOG_E("spirv-cross: Failed to parse SPIR-V: %s", spvc_context_get_last_error_string(context))
         errc = -1;
         spvc_context_destroy(context);
         return "";
@@ -1143,7 +1153,7 @@ std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, GL
 
     if (spvc_context_create_compiler(context, SPVC_BACKEND_GLSL, ir, SPVC_CAPTURE_MODE_TAKE_OWNERSHIP,
                                      &compiler_glsl) != SPVC_SUCCESS) {
-        LOG_E("spirv-cross: Failed to create compiler")
+        LOG_E("spirv-cross: Failed to create compiler: %s", spvc_context_get_last_error_string(context))
         errc = -1;
         spvc_context_destroy(context);
         return "";
@@ -1151,10 +1161,12 @@ std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, GL
 
     spvc_compiler_create_compiler_options(compiler_glsl, &options);
 
-    // Set GLSL ES version (always 320 for ES 3.2)
+    // Configure GLSL ES 3.2 output
     uint target_essl = 320;
     spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_GLSL_VERSION, target_essl);
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_ES, SPVC_TRUE);
+
+    // Default precision for ESSL
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_ES_DEFAULT_FLOAT_PRECISION_HIGHP, SPVC_TRUE);
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_ES_DEFAULT_INT_PRECISION_HIGHP, SPVC_TRUE);
 
@@ -1167,7 +1179,7 @@ std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, GL
     // Emit push constants as plain uniforms (ES doesn't have push constants)
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_EMIT_PUSH_CONSTANT_AS_UNIFORM_BUFFER, SPVC_FALSE);
 
-    // Support for geometry shaders (ES 3.2 via GL_EXT_geometry_shader)
+    // Support for non-zero base instance (ES 3.2 via EXT)
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_SUPPORT_NONZERO_BASE_INSTANCE, SPVC_TRUE);
 
     // Use separate shader objects layout (ES 3.1+)
@@ -1176,8 +1188,7 @@ std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, GL
     spvc_compiler_install_compiler_options(compiler_glsl, options);
 
     if (spvc_compiler_compile(compiler_glsl, &result) != SPVC_SUCCESS) {
-        LOG_E("spirv-cross: Compilation failed: %s",
-              spvc_context_get_last_error_string(context));
+        LOG_E("spirv-cross: Compilation failed: %s", spvc_context_get_last_error_string(context));
         errc = -1;
         spvc_context_destroy(context);
         return "";
@@ -1198,9 +1209,11 @@ std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, GL
     return essl;
 }
 
-// ---------------------------------------------------------------------------
-// Add required ESSL extensions based on shader content
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 14: Stage 4 — ESSL Post-processing
+// ============================================================================
+
+// Add required ESSL extensions based on shader type and content
 static void add_required_extensions(std::string& essl, GLenum shader_type, uint essl_version) {
     std::string extensions;
 
@@ -1214,11 +1227,6 @@ static void add_required_extensions(std::string& essl, GLenum shader_type, uint 
         extensions += "#extension GL_EXT_tessellation_shader : require\n";
     }
 
-    // Compute shader needs no extension on ES 3.1+
-    // Image load/store is natively supported in ES 3.2
-
-    // SSBO is natively supported in ES 3.2
-
     if (!extensions.empty()) {
         size_t version_end = essl.find('\n');
         if (version_end != std::string::npos) {
@@ -1227,20 +1235,46 @@ static void add_required_extensions(std::string& essl, GLenum shader_type, uint 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Main conversion entry point
-// ---------------------------------------------------------------------------
+// Apply all post-processing stages to spirv-cross output
+static std::string postprocess_essl(std::string essl, GLenum shader_type, uint essl_version) {
+    // Remove layout(binding) for non-compute shaders (ES may not support on all targets)
+    if (shader_type != GL_COMPUTE_SHADER) {
+        essl = removeLayoutBinding(essl);
+    }
+
+    // Add layout(location) to outColor declarations
+    essl = processOutColorLocations(essl);
+
+    // Ensure precision qualifiers
+    essl = forceSupporterOutput(essl);
+
+    // Add required extensions
+    add_required_extensions(essl, shader_type, essl_version);
+
+    return essl;
+}
+
+// ============================================================================
+// Section 15: Main Conversion Entry Points
+// ============================================================================
+
 static std::once_flag glslang_init_flag;
 
+// Direct conversion (no caching) — used by GLSLtoGLSLES_2
 std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_version, int& return_code) {
     bool atomicCounterEmulated = false;
+
+    // Stage 1: Preprocess
     std::string correct_glsl_str = preprocess_glsl(glsl_code, glsl_type, &atomicCounterEmulated);
     LOG_D("Preprocessed GLSL:\n%s", correct_glsl_str.c_str())
 
+    // Normalize version
     int glsl_version = get_or_add_glsl_version(correct_glsl_str);
 
+    // Initialize glslang (once per process)
     std::call_once(glslang_init_flag, [] { glslang::InitializeProcess(); });
 
+    // Stage 2: GLSL → SPIR-V
     const char* s[] = {correct_glsl_str.c_str()};
     int errc = 0;
     std::vector<unsigned int> spirv_code = glsl_to_spirv(glsl_type, glsl_version, s, errc);
@@ -1249,6 +1283,7 @@ std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_ve
         return "";
     }
 
+    // Stage 3: SPIR-V → GLSL ES
     errc = 0;
     std::string essl = spirv_to_essl(spirv_code, essl_version, glsl_type, errc);
     if (errc != 0) {
@@ -1256,17 +1291,11 @@ std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_ve
         return "";
     }
 
-    // Post-processing ESSL output
-    if (glsl_type != GL_COMPUTE_SHADER) {
-        essl = removeLayoutBinding(essl);
-    }
-    essl = processOutColorLocations(essl);
-    essl = forceSupporterOutput(essl);
-
-    // Add required extensions
-    add_required_extensions(essl, glsl_type, essl_version);
+    // Stage 4: Post-process
+    essl = postprocess_essl(essl, glsl_type, essl_version);
 
     LOG_D("GLSL to GLSL ES Complete: \n%s", essl.c_str())
+
     return_code = errc;
     if (return_code == 0) {
         return_code = atomicCounterEmulated ? 1 : 0;
@@ -1274,11 +1303,17 @@ std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_ve
     return essl;
 }
 
+// Deprecated path — returns empty string
 std::string GLSLtoGLSLES_1(const char* glsl_code, GLenum glsl_type, uint esversion, int& return_code) {
-    // Deprecated path – use GLSLtoGLSLES_2
+    // Deprecated: use GLSLtoGLSLES_2 instead
+    (void)glsl_code;
+    (void)glsl_type;
+    (void)esversion;
+    return_code = -1;
     return "";
 }
 
+// Main entry point with caching
 std::string GLSLtoGLSLES(const char* glsl_code, GLenum glsl_type, uint essl_version, uint glsl_version,
                          int& return_code) {
     // Build cache key: source hash + shader type + MG version + target ESSL version
@@ -1286,6 +1321,7 @@ std::string GLSLtoGLSLES(const char* glsl_code, GLenum glsl_type, uint essl_vers
     sha256_string += "\n//" + std::to_string(glsl_type) + "|" + std::to_string(MAJOR) + "." + std::to_string(MINOR) +
                      "." + std::to_string(REVISION) + "|" + std::to_string(essl_version);
 
+    // Check cache
     int cached_rc = -1;
     const char* cachedESSL = Cache::get_instance().get(sha256_string.c_str(), &cached_rc);
     if (cachedESSL) {
@@ -1294,6 +1330,7 @@ std::string GLSLtoGLSLES(const char* glsl_code, GLenum glsl_type, uint essl_vers
         return (char*)cachedESSL;
     }
 
+    // Perform conversion
     return_code = -1;
     std::string converted = GLSLtoGLSLES_2(glsl_code, glsl_type, essl_version, return_code);
     if (return_code >= 0 && !converted.empty()) {
