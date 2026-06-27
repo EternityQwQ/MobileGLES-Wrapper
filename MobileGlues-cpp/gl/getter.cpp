@@ -145,11 +145,18 @@ void glGetIntegerv(GLenum pname, GLint* params) {
 
 GLenum glGetError() {
     LOG()
+#if GLOBAL_DEBUG
+    // In debug mode, consume and report real GLES errors.
+    // In release mode, skip the glGetError() GPU round-trip entirely —
+    // glGetError is an implicit glFinish on many drivers, causing a
+    // full pipeline stall. Since we always return GL_NO_ERROR to the
+    // caller, there is no need to query the real error queue.
     GLenum err = GLES.glGetError();
     if (err != GL_NO_ERROR) {
         LOG_W("glGetError\n -> %d", err)
         LOG_W("Now try to cheat.")
     }
+#endif
     return GL_NO_ERROR;
 }
 
@@ -537,20 +544,35 @@ const GLubyte* glGetStringi(GLenum name, GLuint index) {
             if (!str) continue;
 
             std::string copy_str((const char*)str);
-            std::string token_str;
+
+            // First pass: count tokens so we can allocate the parts array
+            // in a single malloc instead of O(n) realloc calls.
+            GLuint token_count = 0;
+            size_t pos = 0;
+            while (true) {
+                token_count++;
+                size_t next = copy_str.find_first_of(delimiter, pos);
+                if (next == std::string::npos) break;
+                pos = next + 1;
+            }
+
+            // Single allocation for the pointer array
+            cache.parts = (const char**)malloc(token_count * sizeof(char*));
+            cache.count = token_count;
+
+            // Second pass: extract tokens
             size_t start = 0;
             size_t end = copy_str.find_first_of(delimiter);
+            GLuint idx = 0;
 
             while (end != std::string::npos) {
-                token_str = copy_str.substr(start, end - start);
-                cache.parts = (const char**)realloc(cache.parts, (cache.count + 1) * sizeof(char*));
-                cache.parts[cache.count++] = strdup(token_str.c_str());
+                std::string token = copy_str.substr(start, end - start);
+                cache.parts[idx++] = strdup(token.c_str());
                 start = end + 1;
                 end = copy_str.find_first_of(delimiter, start);
             }
-            token_str = copy_str.substr(start);
-            cache.parts = (const char**)realloc(cache.parts, (cache.count + 1) * sizeof(char*));
-            cache.parts[cache.count++] = strdup(token_str.c_str());
+            std::string token = copy_str.substr(start);
+            cache.parts[idx++] = strdup(token.c_str());
         }
         initialized = 1;
     }

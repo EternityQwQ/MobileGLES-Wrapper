@@ -105,9 +105,7 @@ extern "C"
     }
 #else
 #define NATIVE_FUNCTION_END(type, name, ...)                                                                           \
-    LOG_D("Use native function: %s @ %s(...)", RENDERERNAME, __FUNCTION__);                                            \
     type ret = GLES.name(__VA_ARGS__);                                                                                 \
-    CHECK_GL_ERROR                                                                                                     \
     return ret;                                                                                                        \
     }
 #endif
@@ -120,7 +118,6 @@ extern "C"
     }
 #else
 #define NATIVE_FUNCTION_END_NO_RETURN(type, name, ...)                                                                 \
-    LOG_D("Use native function: %s @ %s(...)", RENDERERNAME, __FUNCTION__);                                            \
     GLES.name(__VA_ARGS__);                                                                                            \
     }
 #endif
