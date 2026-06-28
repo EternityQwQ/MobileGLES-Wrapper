@@ -7,6 +7,7 @@
 
 #include "log.h"
 #include <unistd.h>
+#include <cstdio>
 #include <mutex>
 
 #include <GL/gl.h>

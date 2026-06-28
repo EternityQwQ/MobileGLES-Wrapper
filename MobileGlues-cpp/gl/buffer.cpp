@@ -334,6 +334,13 @@ GLboolean glIsBuffer(GLuint buffer) {
 void glBindBuffer(GLenum target, GLuint buffer) {
     LOG()
     LOG_D("glBindBuffer, target = %s, buffer = %d", glEnumToString(target), buffer)
+
+    // Redundant-call prevention: skip if the same buffer is already bound to this target
+    int idx = binding_target_to_index(target);
+    if (idx >= 0 && g_bound_buffers_arr[idx] == buffer) [[likely]] {
+        return;
+    }
+
     set_bound_buffer_by_target(target, buffer);
     // save ibo binding to vao
     if (target == GL_ELEMENT_ARRAY_BUFFER) {
@@ -836,6 +843,12 @@ GLboolean glIsVertexArray(GLuint array) {
 void glBindVertexArray(GLuint array) {
     LOG()
     LOG_D("glBindVertexArray(%d)", array)
+
+    // Redundant-call prevention: skip if same VAO is already bound
+    if (bound_array == array) [[likely]] {
+        return;
+    }
+
     bound_array = array;
 
     // update bound ibo

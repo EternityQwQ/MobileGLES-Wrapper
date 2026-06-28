@@ -129,6 +129,84 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         break;
 
     // -------------------------------------------------------------------------
+    // Enable/disable caps — CPU-side from state tracker (avoids GPU round-trip)
+    // -------------------------------------------------------------------------
+    case GL_BLEND:
+    case GL_DEPTH_TEST:
+    case GL_STENCIL_TEST:
+    case GL_CULL_FACE:
+    case GL_SCISSOR_TEST:
+    case GL_DITHER:
+    case GL_POLYGON_OFFSET_FILL:
+    case GL_SAMPLE_ALPHA_TO_COVERAGE:
+    case GL_SAMPLE_COVERAGE:
+    case GL_PRIMITIVE_RESTART_FIXED_INDEX:
+    case GL_RASTERIZER_DISCARD:
+    case GL_FRAMEBUFFER_SRGB:
+        (*params) = gl_state_is_enabled(pname);
+        break;
+
+    // -------------------------------------------------------------------------
+    // Blend state — CPU-side from tracker (avoids GPU round-trip)
+    // -------------------------------------------------------------------------
+    case GL_BLEND_SRC_RGB:
+        (*params) = gl_state->blend_src_rgb;
+        break;
+    case GL_BLEND_DST_RGB:
+        (*params) = gl_state->blend_dst_rgb;
+        break;
+    case GL_BLEND_SRC_ALPHA:
+        (*params) = gl_state->blend_src_alpha;
+        break;
+    case GL_BLEND_DST_ALPHA:
+        (*params) = gl_state->blend_dst_alpha;
+        break;
+    case GL_BLEND_EQUATION_RGB:
+        (*params) = gl_state->blend_equation_rgb;
+        break;
+    case GL_BLEND_EQUATION_ALPHA:
+        (*params) = gl_state->blend_equation_alpha;
+        break;
+
+    // -------------------------------------------------------------------------
+    // Depth/Stencil/Cull state — CPU-side from tracker
+    // -------------------------------------------------------------------------
+    case GL_DEPTH_FUNC:
+        (*params) = gl_state->depth_func;
+        break;
+    case GL_DEPTH_WRITEMASK:
+        (*params) = gl_state->depth_mask;
+        break;
+    case GL_STENCIL_FUNC:
+        (*params) = gl_state->stencil_func_front;
+        break;
+    case GL_STENCIL_FAIL:
+        (*params) = gl_state->stencil_fail_front;
+        break;
+    case GL_STENCIL_PASS_DEPTH_FAIL:
+        (*params) = gl_state->stencil_zfail_front;
+        break;
+    case GL_STENCIL_PASS_DEPTH_PASS:
+        (*params) = gl_state->stencil_zpass_front;
+        break;
+    case GL_CULL_FACE_MODE:
+        (*params) = gl_state->cull_face_mode;
+        break;
+    case GL_FRONT_FACE:
+        (*params) = gl_state->front_face;
+        break;
+
+    // -------------------------------------------------------------------------
+    // Program/Texture unit — CPU-side from tracker
+    // -------------------------------------------------------------------------
+    case GL_CURRENT_PROGRAM:
+        (*params) = gl_state->current_program;
+        break;
+    case GL_ACTIVE_TEXTURE:
+        (*params) = GL_TEXTURE0 + gl_state->current_tex_unit;
+        break;
+
+    // -------------------------------------------------------------------------
     // All other queries — forward to native ES 3.2 GLES
     // -------------------------------------------------------------------------
     default:

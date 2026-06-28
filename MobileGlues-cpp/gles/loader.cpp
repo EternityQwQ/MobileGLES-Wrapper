@@ -125,6 +125,35 @@ void init_gl_state() {
     set_gl_state_proxy_width(0);
     set_gl_state_proxy_intformat(0);
 
+    // Initialize tracked state to OpenGL defaults (for redundant-call prevention)
+    gl_state->enable_caps_mask = 0;
+    // Blend state defaults
+    gl_state->blend_src_rgb = GL_ONE;
+    gl_state->blend_dst_rgb = GL_ZERO;
+    gl_state->blend_src_alpha = GL_ONE;
+    gl_state->blend_dst_alpha = GL_ZERO;
+    gl_state->blend_equation_rgb = GL_FUNC_ADD;
+    gl_state->blend_equation_alpha = GL_FUNC_ADD;
+    gl_state->blend_color[0] = 0.0f;
+    gl_state->blend_color[1] = 0.0f;
+    gl_state->blend_color[2] = 0.0f;
+    gl_state->blend_color[3] = 0.0f;
+    // Depth state defaults
+    gl_state->depth_func = GL_LESS;
+    gl_state->depth_mask = GL_TRUE;
+    // Stencil state defaults
+    gl_state->stencil_func_front = GL_ALWAYS;
+    gl_state->stencil_func_back = GL_ALWAYS;
+    gl_state->stencil_fail_front = GL_KEEP;
+    gl_state->stencil_zfail_front = GL_KEEP;
+    gl_state->stencil_zpass_front = GL_KEEP;
+    gl_state->stencil_fail_back = GL_KEEP;
+    gl_state->stencil_zfail_back = GL_KEEP;
+    gl_state->stencil_zpass_back = GL_KEEP;
+    // Cull face defaults
+    gl_state->cull_face_mode = GL_BACK;
+    gl_state->front_face = GL_CCW;
+
     InitTextureMap(1024);
     InitBufferMap(4096);
     InitVertexArrayMap(512);

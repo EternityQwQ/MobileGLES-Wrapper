@@ -27,6 +27,7 @@
 #include "texture.h"
 #include "GLES3/gl32.h"
 
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -580,6 +581,14 @@ void glBindTexture(GLenum target, GLuint texture) {
     LOG_D("glBindTexture(%s, %d)", glEnumToString(target), texture)
     INIT_CHECK_GL_ERROR
 
+    // Redundant-call prevention: skip GLES call if same texture is already bound to the same target
+    if (target == GL_TEXTURE_2D) {
+        const int unitIndex = GetCurrentTextureUnitIndex();
+        if (g_tracked_tex2d_binding[unitIndex] == texture) [[likely]] {
+            return;
+        }
+    }
+
     if (hardware && gl_state && hardware->emulate_texture_buffer && target == GL_TEXTURE_BUFFER) {
         GLES.glActiveTexture(GL_TEXTURE0 + 15);
         GLES.glBindTexture(GL_TEXTURE_2D, texture);
@@ -638,10 +647,15 @@ void glActiveTexture(GLenum texture) {
         LOG_E("Invalid texture enum: %s", glEnumToString(texture))
         return;
     }
-
-    set_gl_state_current_tex_unit(texture - GL_TEXTURE0);
+    GLuint unit = texture - GL_TEXTURE0;
+    // Redundant-call prevention: skip GLES call if unit is already active
+    if (gl_state->current_tex_unit == unit) [[likely]] {
+        ActivateTextureUnit(unit);
+        return;
+    }
+    set_gl_state_current_tex_unit(unit);
     GLES.glActiveTexture(texture);
-    ActivateTextureUnit(texture - GL_TEXTURE0);
+    ActivateTextureUnit(unit);
     CHECK_GL_ERROR
 }
 

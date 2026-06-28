@@ -132,6 +132,10 @@ void glValidateProgram(GLuint program) {
 
 void glUseProgram(GLuint program) {
     LOG()
+    // Redundant-call prevention: skip GLES call if program is already active
+    if (gl_state->current_program == program) [[likely]] {
+        return;
+    }
     set_gl_state_current_program(program);
     GLES.glUseProgram(program);
 }

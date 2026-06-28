@@ -311,12 +311,29 @@ NATIVE_FUNCTION_HEAD(void, glProgramUniformMatrix4x3fv, GLuint program, GLint lo
 // State Management
 // ============================================================================
 
-NATIVE_FUNCTION_HEAD(void, glEnable, GLenum cap) NATIVE_FUNCTION_END_NO_RETURN(void, glEnable, cap)
-NATIVE_FUNCTION_HEAD(void, glDisable, GLenum cap) NATIVE_FUNCTION_END_NO_RETURN(void, glDisable, cap)
-NATIVE_FUNCTION_HEAD(void, glEnablei, GLenum target, GLuint index) NATIVE_FUNCTION_END_NO_RETURN(void, glEnablei, target,index)
-NATIVE_FUNCTION_HEAD(void, glDisablei, GLenum target, GLuint index) NATIVE_FUNCTION_END_NO_RETURN(void, glDisablei, target,index)
-NATIVE_FUNCTION_HEAD(GLboolean, glIsEnabled, GLenum cap) NATIVE_FUNCTION_END(GLboolean, glIsEnabled, cap)
-NATIVE_FUNCTION_HEAD(GLboolean, glIsEnabledi, GLenum target, GLuint index) NATIVE_FUNCTION_END(GLboolean, glIsEnabledi, target,index)
+// glEnable/glDisable: track state CPU-side for fast glIsEnabled, then forward to GLES
+extern "C" void glEnable(GLenum cap) {
+    gl_state_track_enable(cap);
+    GLES.glEnable(cap);
+}
+extern "C" void glDisable(GLenum cap) {
+    gl_state_track_disable(cap);
+    GLES.glDisable(cap);
+}
+// glIsEnabled: check CPU-side cache first, avoid GPU round-trip
+extern "C" GLboolean glIsEnabled(GLenum cap) {
+    return gl_state_is_enabled(cap);
+}
+// glEnablei/glDisablei: indexed state — pass through to GLES (less common, not worth tracking)
+extern "C" void glEnablei(GLenum target, GLuint index) {
+    GLES.glEnablei(target, index);
+}
+extern "C" void glDisablei(GLenum target, GLuint index) {
+    GLES.glDisablei(target, index);
+}
+extern "C" GLboolean glIsEnabledi(GLenum target, GLuint index) {
+    return GLES.glIsEnabledi(target, index);
+}
 // glGetError is handled in getter.cpp (always returns GL_NO_ERROR)
 // glGetIntegerv is handled in getter.cpp (custom getter)
 NATIVE_FUNCTION_HEAD(void, glGetBooleanv, GLenum pname, GLboolean *data) NATIVE_FUNCTION_END_NO_RETURN(void, glGetBooleanv, pname,data)
@@ -357,18 +374,50 @@ NATIVE_FUNCTION_HEAD(void, glDispatchComputeIndirect, GLintptr indirect) NATIVE_
 // Blending Operations
 // ============================================================================
 
-NATIVE_FUNCTION_HEAD(void, glBlendColor, GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendColor, red,green,blue,alpha)
-NATIVE_FUNCTION_HEAD(void, glBlendEquation, GLenum mode) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendEquation, mode)
-NATIVE_FUNCTION_HEAD(void, glBlendEquationSeparate, GLenum modeRGB, GLenum modeAlpha) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendEquationSeparate, modeRGB,modeAlpha)
-NATIVE_FUNCTION_HEAD(void, glBlendFunc, GLenum sfactor, GLenum dfactor) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendFunc, sfactor,dfactor)
-NATIVE_FUNCTION_HEAD(void, glBlendFuncSeparate, GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendFuncSeparate, sfactorRGB,dfactorRGB,sfactorAlpha,dfactorAlpha)
-NATIVE_FUNCTION_HEAD(void, glBlendEquationi, GLuint buf, GLenum mode) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendEquationi, buf,mode)
-NATIVE_FUNCTION_HEAD(void, glBlendEquationSeparatei, GLuint buf, GLenum modeRGB, GLenum modeAlpha) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendEquationSeparatei, buf,modeRGB,modeAlpha)
-NATIVE_FUNCTION_HEAD(void, glBlendFunci, GLuint buf, GLenum src, GLenum dst) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendFunci, buf,src,dst)
-NATIVE_FUNCTION_HEAD(void, glBlendFuncSeparatei, GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendFuncSeparatei, buf,srcRGB,dstRGB,srcAlpha,dstAlpha)
-NATIVE_FUNCTION_HEAD(void, glColorMask, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) NATIVE_FUNCTION_END_NO_RETURN(void, glColorMask, red,green,blue,alpha)
-NATIVE_FUNCTION_HEAD(void, glColorMaski, GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a) NATIVE_FUNCTION_END_NO_RETURN(void, glColorMaski, index,r,g,b,a)
-NATIVE_FUNCTION_HEAD(void, glBlendBarrier) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendBarrier)
+// --- Blend state (redundant-call prevention) ---
+extern "C" void glBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
+    if (gl_state->blend_color[0] == red && gl_state->blend_color[1] == green &&
+        gl_state->blend_color[2] == blue && gl_state->blend_color[3] == alpha) [[likely]] { return; }
+    set_gl_state_blend_color(red, green, blue, alpha);
+    GLES.glBlendColor(red, green, blue, alpha);
+}
+extern "C" void glBlendEquation(GLenum mode) {
+    if (gl_state->blend_equation_rgb == mode) [[likely]] { return; }
+    set_gl_state_blend_equation_rgb(mode);
+    set_gl_state_blend_equation_alpha(mode);
+    GLES.glBlendEquation(mode);
+}
+extern "C" void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
+    if (gl_state->blend_equation_rgb == modeRGB && gl_state->blend_equation_alpha == modeAlpha) [[likely]] { return; }
+    set_gl_state_blend_equation_rgb(modeRGB);
+    set_gl_state_blend_equation_alpha(modeAlpha);
+    GLES.glBlendEquationSeparate(modeRGB, modeAlpha);
+}
+extern "C" void glBlendFunc(GLenum sfactor, GLenum dfactor) {
+    if (gl_state->blend_src_rgb == sfactor && gl_state->blend_dst_rgb == dfactor) [[likely]] { return; }
+    set_gl_state_blend_src_rgb(sfactor);
+    set_gl_state_blend_dst_rgb(dfactor);
+    set_gl_state_blend_src_alpha(sfactor);
+    set_gl_state_blend_dst_alpha(dfactor);
+    GLES.glBlendFunc(sfactor, dfactor);
+}
+extern "C" void glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha) {
+    if (gl_state->blend_src_rgb == sfactorRGB && gl_state->blend_dst_rgb == dfactorRGB &&
+        gl_state->blend_src_alpha == sfactorAlpha && gl_state->blend_dst_alpha == dfactorAlpha) [[likely]] { return; }
+    set_gl_state_blend_src_rgb(sfactorRGB);
+    set_gl_state_blend_dst_rgb(dfactorRGB);
+    set_gl_state_blend_src_alpha(sfactorAlpha);
+    set_gl_state_blend_dst_alpha(dfactorAlpha);
+    GLES.glBlendFuncSeparate(sfactorRGB, dfactorRGB, sfactorAlpha, dfactorAlpha);
+}
+// Per-buffer blend: less common, pass through
+extern "C" void glBlendEquationi(GLuint buf, GLenum mode) { GLES.glBlendEquationi(buf, mode); }
+extern "C" void glBlendEquationSeparatei(GLuint buf, GLenum modeRGB, GLenum modeAlpha) { GLES.glBlendEquationSeparatei(buf, modeRGB, modeAlpha); }
+extern "C" void glBlendFunci(GLuint buf, GLenum src, GLenum dst) { GLES.glBlendFunci(buf, src, dst); }
+extern "C" void glBlendFuncSeparatei(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) { GLES.glBlendFuncSeparatei(buf, srcRGB, dstRGB, srcAlpha, dstAlpha); }
+extern "C" void glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) { GLES.glColorMask(red, green, blue, alpha); }
+extern "C" void glColorMaski(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a) { GLES.glColorMaski(index, r, g, b, a); }
+extern "C" void glBlendBarrier() { GLES.glBlendBarrier(); }
 
 // ============================================================================
 // Read-back Operations
@@ -396,22 +445,90 @@ NATIVE_FUNCTION_HEAD(void, glPatchParameteri, GLenum pname, GLint value) NATIVE_
 // Stencil and Depth Operations
 // ============================================================================
 
-NATIVE_FUNCTION_HEAD(void, glDepthFunc, GLenum func) NATIVE_FUNCTION_END_NO_RETURN(void, glDepthFunc, func)
-NATIVE_FUNCTION_HEAD(void, glDepthMask, GLboolean flag) NATIVE_FUNCTION_END_NO_RETURN(void, glDepthMask, flag)
-NATIVE_FUNCTION_HEAD(void, glDepthRangef, GLfloat n, GLfloat f) NATIVE_FUNCTION_END_NO_RETURN(void, glDepthRangef, n,f)
-NATIVE_FUNCTION_HEAD(void, glStencilFunc, GLenum func, GLint ref, GLuint mask) NATIVE_FUNCTION_END_NO_RETURN(void, glStencilFunc, func,ref,mask)
-NATIVE_FUNCTION_HEAD(void, glStencilFuncSeparate, GLenum face, GLenum func, GLint ref, GLuint mask) NATIVE_FUNCTION_END_NO_RETURN(void, glStencilFuncSeparate, face,func,ref,mask)
-NATIVE_FUNCTION_HEAD(void, glStencilMask, GLuint mask) NATIVE_FUNCTION_END_NO_RETURN(void, glStencilMask, mask)
-NATIVE_FUNCTION_HEAD(void, glStencilMaskSeparate, GLenum face, GLuint mask) NATIVE_FUNCTION_END_NO_RETURN(void, glStencilMaskSeparate, face,mask)
-NATIVE_FUNCTION_HEAD(void, glStencilOp, GLenum fail, GLenum zfail, GLenum zpass) NATIVE_FUNCTION_END_NO_RETURN(void, glStencilOp, fail,zfail,zpass)
-NATIVE_FUNCTION_HEAD(void, glStencilOpSeparate, GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass) NATIVE_FUNCTION_END_NO_RETURN(void, glStencilOpSeparate, face,sfail,dpfail,dppass)
+// --- Depth state (redundant-call prevention) ---
+extern "C" void glDepthFunc(GLenum func) {
+    if (gl_state->depth_func == func) [[likely]] { return; }
+    set_gl_state_depth_func(func);
+    GLES.glDepthFunc(func);
+}
+extern "C" void glDepthMask(GLboolean flag) {
+    if (gl_state->depth_mask == flag) [[likely]] { return; }
+    set_gl_state_depth_mask(flag);
+    GLES.glDepthMask(flag);
+}
+extern "C" void glDepthRangef(GLfloat n, GLfloat f) { GLES.glDepthRangef(n, f); }
+
+// --- Stencil state (redundant-call prevention) ---
+extern "C" void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
+    if (gl_state->stencil_func_front == func && gl_state->stencil_func_back == func) [[likely]] { return; }
+    set_gl_state_stencil_func_front(func);
+    set_gl_state_stencil_func_back(func);
+    GLES.glStencilFunc(func, ref, mask);
+}
+extern "C" void glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask) {
+    bool needs_call = false;
+    if (face == GL_FRONT || face == GL_FRONT_AND_BACK) {
+        if (gl_state->stencil_func_front != func) { set_gl_state_stencil_func_front(func); needs_call = true; }
+    }
+    if (face == GL_BACK || face == GL_FRONT_AND_BACK) {
+        if (gl_state->stencil_func_back != func) { set_gl_state_stencil_func_back(func); needs_call = true; }
+    }
+    if (!needs_call) [[likely]] return;
+    GLES.glStencilFuncSeparate(face, func, ref, mask);
+}
+extern "C" void glStencilMask(GLuint mask) { GLES.glStencilMask(mask); }
+extern "C" void glStencilMaskSeparate(GLenum face, GLuint mask) { GLES.glStencilMaskSeparate(face, mask); }
+extern "C" void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
+    if (gl_state->stencil_fail_front == fail && gl_state->stencil_zfail_front == zfail &&
+        gl_state->stencil_zpass_front == zpass && gl_state->stencil_fail_back == fail &&
+        gl_state->stencil_zfail_back == zfail && gl_state->stencil_zpass_back == zpass) [[likely]] { return; }
+    set_gl_state_stencil_fail_front(fail);
+    set_gl_state_stencil_zfail_front(zfail);
+    set_gl_state_stencil_zpass_front(zpass);
+    set_gl_state_stencil_fail_back(fail);
+    set_gl_state_stencil_zfail_back(zfail);
+    set_gl_state_stencil_zpass_back(zpass);
+    GLES.glStencilOp(fail, zfail, zpass);
+}
+extern "C" void glStencilOpSeparate(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass) {
+    bool needs_call = false;
+    if (face == GL_FRONT || face == GL_FRONT_AND_BACK) {
+        if (gl_state->stencil_fail_front != sfail || gl_state->stencil_zfail_front != dpfail ||
+            gl_state->stencil_zpass_front != dppass) {
+            set_gl_state_stencil_fail_front(sfail);
+            set_gl_state_stencil_zfail_front(dpfail);
+            set_gl_state_stencil_zpass_front(dppass);
+            needs_call = true;
+        }
+    }
+    if (face == GL_BACK || face == GL_FRONT_AND_BACK) {
+        if (gl_state->stencil_fail_back != sfail || gl_state->stencil_zfail_back != dpfail ||
+            gl_state->stencil_zpass_back != dppass) {
+            set_gl_state_stencil_fail_back(sfail);
+            set_gl_state_stencil_zfail_back(dpfail);
+            set_gl_state_stencil_zpass_back(dppass);
+            needs_call = true;
+        }
+    }
+    if (!needs_call) [[likely]] return;
+    GLES.glStencilOpSeparate(face, sfail, dpfail, dppass);
+}
 
 // ============================================================================
 // Culling and Face Operations
 // ============================================================================
 
-NATIVE_FUNCTION_HEAD(void, glCullFace, GLenum mode) NATIVE_FUNCTION_END_NO_RETURN(void, glCullFace, mode)
-NATIVE_FUNCTION_HEAD(void, glFrontFace, GLenum mode) NATIVE_FUNCTION_END_NO_RETURN(void, glFrontFace, mode)
+// --- Cull face state (redundant-call prevention) ---
+extern "C" void glCullFace(GLenum mode) {
+    if (gl_state->cull_face_mode == mode) [[likely]] { return; }
+    set_gl_state_cull_face_mode(mode);
+    GLES.glCullFace(mode);
+}
+extern "C" void glFrontFace(GLenum mode) {
+    if (gl_state->front_face == mode) [[likely]] { return; }
+    set_gl_state_front_face(mode);
+    GLES.glFrontFace(mode);
+}
 
 // ============================================================================
 // Finish and Flush
