@@ -24,18 +24,8 @@
 
 // ============================================================================
 // Texture ID management
+// NOTE: glGenTextures is defined in gl_native.cpp (native passthrough)
 // ============================================================================
-
-void glGenTextures(GLsizei n, GLuint *textures) {
-    LOG()
-    GLES.glGenTextures(n, textures);
-
-    auto &ts = GLState.texture;
-    for (GLsizei i = 0; i < n; i++) {
-        ts.textureMap[textures[i]] = textures[i];
-        ts.textureMapReverse[textures[i]] = textures[i];
-    }
-}
 
 void glDeleteTextures(GLsizei n, const GLuint *textures) {
     LOG()

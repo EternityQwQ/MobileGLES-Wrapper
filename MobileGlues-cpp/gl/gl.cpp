@@ -1,5 +1,8 @@
 // MobileGlues - gl/gl.cpp
-// Core GL state wrappers: glClear, glClearDepth, glHint, glViewport, etc.
+// Core GL state wrappers: glClearDepth, glClear, glHint, glDrawBuffer, glReadBuffer.
+// NOTE: glDepthRange, glPolygonMode, glPointSize are in gl_stub.cpp
+//       glViewport is in FSR1/FSR1.cpp
+//       glGenTextures is in gl_native.cpp
 //
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
@@ -29,16 +32,6 @@ void glClearDepth(GLclampd depth) {
 }
 
 // ============================================================================
-// glDepthRange - desktop uses double, ES uses float
-// ============================================================================
-
-void glDepthRange(GLclampd near_val, GLclampd far_val) {
-    LOG()
-    GLES.glDepthRangef((GLfloat)near_val, (GLfloat)far_val);
-    CHECK_GL_ERROR
-}
-
-// ============================================================================
 // glClear - handles legacy clear mask conversion
 // ============================================================================
 
@@ -51,42 +44,13 @@ void glClear(GLbitfield mask) {
 }
 
 // ============================================================================
-// glViewport - track viewport state
-// ============================================================================
-
-NATIVE_FUNCTION_HEAD(void, glViewport, GLint x, GLint y, GLsizei width, GLsizei height)
-{
-    GLState.legacy.viewport[0] = x;
-    GLState.legacy.viewport[1] = y;
-    GLState.legacy.viewport[2] = width;
-    GLState.legacy.viewport[3] = height;
-}
-NATIVE_FUNCTION_END_NO_RETURN(void, glViewport, x, y, width, height)
-
-// ============================================================================
 // glHint - pass through (ES supports basic hints)
 // ============================================================================
 
-NATIVE_FUNCTION_HEAD(void, glHint, GLenum target, GLenum mode)
-{
-}
-NATIVE_FUNCTION_END_NO_RETURN(void, glHint, target, mode)
-
-// ============================================================================
-// glPolygonMode - not supported in ES core, track CPU-side only
-// ============================================================================
-
-void glPolygonMode(GLenum face, GLenum mode) {
+void glHint(GLenum target, GLenum mode) {
     LOG()
-    // ES 3.2 doesn't support glPolygonMode natively
-    // Track it CPU-side for queries
-    if (face == GL_FRONT || face == GL_FRONT_AND_BACK) {
-        GLState.legacy.polygonMode[0] = mode;
-    }
-    if (face == GL_BACK || face == GL_FRONT_AND_BACK) {
-        GLState.legacy.polygonMode[1] = mode;
-    }
-    // No actual GL call - ES doesn't support polygon mode
+    GLES.glHint(target, mode);
+    CHECK_GL_ERROR
 }
 
 // ============================================================================
@@ -117,19 +81,9 @@ void glDrawBuffer(GLenum mode) {
 // glReadBuffer - track read buffer state
 // ============================================================================
 
-NATIVE_FUNCTION_HEAD(void, glReadBuffer, GLenum mode)
-{
-    GLState.framebuffer.readBuffer = mode;
-}
-NATIVE_FUNCTION_END_NO_RETURN(void, glReadBuffer, mode)
-
-// ============================================================================
-// glPointSize - not in ES 3.2 core, track CPU-side only
-// ============================================================================
-
-void glPointSize(GLfloat size) {
+void glReadBuffer(GLenum mode) {
     LOG()
-    // ES 3.2 doesn't support glPointSize; use gl_PointSize in shader instead
-    // Track CPU-side for queries
-    GLState.legacy.lineWidth = size; // reuse lineWidth as point size placeholder
+    GLES.glReadBuffer(mode);
+    GLState.framebuffer.readBuffer = mode;
+    CHECK_GL_ERROR
 }
