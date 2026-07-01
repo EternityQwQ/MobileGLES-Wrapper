@@ -18,38 +18,37 @@
 #define DEBUG 0
 
 // ============================================================================
-// glClear - handles legacy clear mask conversion
-// ============================================================================
-
-NATIVE_FUNCTION_HEAD(void, glClear, GLbitfield mask)
-{
-    // GL_ACCUM_BUFFER_BIT is not supported in ES, strip it
-    mask &= ~0x00000200; // GL_ACCUM_BUFFER_BIT
-    _native(mask);
-}
-NATIVE_FUNCTION_END_NO_RETURN(void, glClear, mask)
-
-// ============================================================================
 // glClearDepth - desktop uses double, ES uses float
 // ============================================================================
 
-NATIVE_FUNCTION_HEAD(void, glClearDepth, GLclampd depth)
-{
-    _native((GLfloat)depth);
+void glClearDepth(GLclampd depth) {
+    LOG()
+    GLES.glClearDepthf((float)depth);
     GLState.legacy.clearDepth = (GLfloat)depth;
+    CHECK_GL_ERROR
 }
-NATIVE_FUNCTION_END_NO_RETURN(void, glClearDepth, depth)
 
 // ============================================================================
 // glDepthRange - desktop uses double, ES uses float
 // ============================================================================
 
-NATIVE_FUNCTION_HEAD(void, glDepthRange, GLclampd near_val, GLclampd far_val)
-{
-    static auto glDepthRangef = (decltype(&glDepthRangef))g_loader_handle("glDepthRangef");
-    glDepthRangef((GLfloat)near_val, (GLfloat)far_val);
+void glDepthRange(GLclampd near_val, GLclampd far_val) {
+    LOG()
+    GLES.glDepthRangef((GLfloat)near_val, (GLfloat)far_val);
+    CHECK_GL_ERROR
 }
-NATIVE_FUNCTION_END_NO_RETURN(void, glDepthRange, near_val, far_val)
+
+// ============================================================================
+// glClear - handles legacy clear mask conversion
+// ============================================================================
+
+void glClear(GLbitfield mask) {
+    LOG()
+    // GL_ACCUM_BUFFER_BIT is not supported in ES, strip it
+    mask &= ~0x00000200; // GL_ACCUM_BUFFER_BIT
+    GLES.glClear(mask);
+    CHECK_GL_ERROR
+}
 
 // ============================================================================
 // glViewport - track viewport state
@@ -57,7 +56,6 @@ NATIVE_FUNCTION_END_NO_RETURN(void, glDepthRange, near_val, far_val)
 
 NATIVE_FUNCTION_HEAD(void, glViewport, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    _native(x, y, width, height);
     GLState.legacy.viewport[0] = x;
     GLState.legacy.viewport[1] = y;
     GLState.legacy.viewport[2] = width;
@@ -71,26 +69,15 @@ NATIVE_FUNCTION_END_NO_RETURN(void, glViewport, x, y, width, height)
 
 NATIVE_FUNCTION_HEAD(void, glHint, GLenum target, GLenum mode)
 {
-    _native(target, mode);
 }
 NATIVE_FUNCTION_END_NO_RETURN(void, glHint, target, mode)
 
 // ============================================================================
-// glScissor - track scissor state
+// glPolygonMode - not supported in ES core, track CPU-side only
 // ============================================================================
 
-// Already native in gl_native.cpp, but we need to track state
-// glScissor in gl_native.cpp is NATIVE_FUNCTION_HEAD, so we add tracking here
-// Note: glScissor is already defined in gl_native.cpp, so we skip redefinition
-// and just use the native passthrough. State tracking for scissor is done in
-// getter.cpp when glGetIntegerv(GL_SCISSOR_BOX) is called.
-
-// ============================================================================
-// glPolygonMode - not supported in ES core, track CPU-side
-// ============================================================================
-
-NATIVE_FUNCTION_HEAD(void, glPolygonMode, GLenum face, GLenum mode)
-{
+void glPolygonMode(GLenum face, GLenum mode) {
+    LOG()
     // ES 3.2 doesn't support glPolygonMode natively
     // Track it CPU-side for queries
     if (face == GL_FRONT || face == GL_FRONT_AND_BACK) {
@@ -101,34 +88,30 @@ NATIVE_FUNCTION_HEAD(void, glPolygonMode, GLenum face, GLenum mode)
     }
     // No actual GL call - ES doesn't support polygon mode
 }
-NATIVE_FUNCTION_END_NO_RETURN(void, glPolygonMode, face, mode)
 
 // ============================================================================
 // glDrawBuffer - maps to glDrawBuffers in ES
 // ============================================================================
 
-NATIVE_FUNCTION_HEAD(void, glDrawBuffer, GLenum mode)
-{
+void glDrawBuffer(GLenum mode) {
+    LOG()
     if (mode == GL_NONE) {
         GLenum none = GL_NONE;
-        static auto glDrawBuffers = (decltype(&glDrawBuffers))g_loader_handle("glDrawBuffers");
-        glDrawBuffers(1, &none);
+        GLES.glDrawBuffers(1, &none);
         GLState.framebuffer.drawBuffers[0] = GL_NONE;
         GLState.framebuffer.drawBufferCount = 1;
-    } else if (mode >= GL_COLOR_ATTACHMENT0 && mode <= GL_COLOR_ATTACHMENT0 + MAX_DRAW_BUFFERS) {
-        static auto glDrawBuffers = (decltype(&glDrawBuffers))g_loader_handle("glDrawBuffers");
-        glDrawBuffers(1, &mode);
+    } else if (mode >= GL_COLOR_ATTACHMENT0 && mode <= GL_COLOR_ATTACHMENT0 + 31) {
+        GLES.glDrawBuffers(1, &mode);
         GLState.framebuffer.drawBuffers[0] = mode;
         GLState.framebuffer.drawBufferCount = 1;
     } else if (mode == GL_BACK || mode == GL_FRONT) {
         GLenum back = GL_BACK;
-        static auto glDrawBuffers = (decltype(&glDrawBuffers))g_loader_handle("glDrawBuffers");
-        glDrawBuffers(1, &back);
+        GLES.glDrawBuffers(1, &back);
         GLState.framebuffer.drawBuffers[0] = GL_BACK;
         GLState.framebuffer.drawBufferCount = 1;
     }
+    CHECK_GL_ERROR
 }
-NATIVE_FUNCTION_END_NO_RETURN(void, glDrawBuffer, mode)
 
 // ============================================================================
 // glReadBuffer - track read buffer state
@@ -136,37 +119,17 @@ NATIVE_FUNCTION_END_NO_RETURN(void, glDrawBuffer, mode)
 
 NATIVE_FUNCTION_HEAD(void, glReadBuffer, GLenum mode)
 {
-    _native(mode);
     GLState.framebuffer.readBuffer = mode;
 }
 NATIVE_FUNCTION_END_NO_RETURN(void, glReadBuffer, mode)
 
 // ============================================================================
-// glColorMask - track color write mask
+// glPointSize - not in ES 3.2 core, track CPU-side only
 // ============================================================================
 
-// Already native in gl_native.cpp, state tracking done in getter.cpp
-
-// ============================================================================
-// glDepthMask - track depth write mask
-// ============================================================================
-
-// Already native in gl_native.cpp, state tracking done in getter.cpp
-
-// ============================================================================
-// glLineWidth - track line width
-// ============================================================================
-
-// Already native in gl_native.cpp, state tracking done in getter.cpp
-
-// ============================================================================
-// glPointSize - not in ES 3.2 core, track CPU-side
-// ============================================================================
-
-NATIVE_FUNCTION_HEAD(void, glPointSize, GLfloat size)
-{
+void glPointSize(GLfloat size) {
+    LOG()
     // ES 3.2 doesn't support glPointSize; use gl_PointSize in shader instead
     // Track CPU-side for queries
     GLState.legacy.lineWidth = size; // reuse lineWidth as point size placeholder
 }
-NATIVE_FUNCTION_END_NO_RETURN(void, glPointSize, size)
