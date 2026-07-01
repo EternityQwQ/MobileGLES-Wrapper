@@ -233,17 +233,5 @@ void glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei* 
     CHECK_GL_ERROR
 }
 
-// ============================================================================
-// glGetString - return custom renderer string
-// ============================================================================
 
-const GLubyte* glGetString(GLenum name) {
-    const GLubyte* result = GLES.glGetString(name);
-    if (name == GL_RENDERER) {
-        return (const GLubyte*)"MobileGlues";
-    }
-    if (name == GL_VENDOR) {
-        return (const GLubyte*)"MobileGL-Dev";
-    }
-    return result;
-}
+
