@@ -14,6 +14,7 @@
 #include "log.h"
 #include "../gles/loader.h"
 #include "mg.h"
+#include "ComputeShader.h"
 #include <GLES3/gl32.h>
 #include <cstring>
 
@@ -155,6 +156,8 @@ void glUseProgram(GLuint program) {
     GLState.shader.currentProgram = program;
     GLState.currentProgram = program;
     GLES.glUseProgram(program);
+    // Notify compute shader module of program change (for work group size tracking)
+    ComputeShader_OnUseProgram(program);
 }
 
 // ============================================================================

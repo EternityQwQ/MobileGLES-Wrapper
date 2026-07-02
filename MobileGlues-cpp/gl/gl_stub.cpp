@@ -10,6 +10,7 @@
 #include "log.h"
 #include "../gles/loader.h"
 #include "mg.h"
+#include "ComputeShader.h"
 #include <cmath>
 #include <cstring>
 
@@ -634,7 +635,11 @@ STUB_FUNCTION_HEAD(void, glBindBuffersBase, GLenum target, GLuint first, GLsizei
 STUB_FUNCTION_HEAD(void, glBindBuffersRange, GLenum target, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizeiptr* sizes); STUB_FUNCTION_END_NO_RETURN(void, glBindBuffersRange,target,first,count,buffers,offsets,sizes)
 //STUB_FUNCTION_HEAD(void, glBindTextures, GLuint first, GLsizei count, const GLuint* textures); STUB_FUNCTION_END_NO_RETURN(void, glBindTextures,first,count,textures)
 //STUB_FUNCTION_HEAD(void, glBindSamplers, GLuint first, GLsizei count, const GLuint* samplers); STUB_FUNCTION_END_NO_RETURN(void, glBindSamplers,first,count,samplers)
-//STUB_FUNCTION_HEAD(void, glBindImageTextures, GLuint first, GLsizei count, const GLuint* textures); STUB_FUNCTION_END_NO_RETURN(void, glBindImageTextures,first,count,textures)
+// glBindImageTextures - emulated via loop of glBindImageTexture
+// (see ComputeShader.cpp for the implementation)
+CPU_SIM_FUNCTION_HEAD(void, glBindImageTextures, GLuint first, GLsizei count, const GLuint* textures)
+    mgBindImageTextures(first, count, textures);
+CPU_SIM_FUNCTION_END_NO_RETURN(void, glBindImageTextures, first, count, textures)
 //STUB_FUNCTION_HEAD(void, glBindVertexBuffers, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizei* strides); STUB_FUNCTION_END_NO_RETURN(void, glBindVertexBuffers,first,count,buffers,offsets,strides)
 STUB_FUNCTION_HEAD(void, glClipControl, GLenum origin, GLenum depth); STUB_FUNCTION_END_NO_RETURN(void, glClipControl,origin,depth)
 //STUB_FUNCTION_HEAD(void, glCreateTransformFeedbacks, GLsizei n, GLuint* ids); STUB_FUNCTION_END_NO_RETURN(void, glCreateTransformFeedbacks,n,ids)
@@ -773,7 +778,11 @@ STUB_FUNCTION_HEAD(void, glVertexAttribL1ui64vARB, GLuint index, const GLuint64E
 STUB_FUNCTION_HEAD(void, glGetVertexAttribLui64vARB, GLuint index, GLenum pname, GLuint64EXT* params); STUB_FUNCTION_END_NO_RETURN(void, glGetVertexAttribLui64vARB,index,pname,params)
 STUB_FUNCTION_HEAD(GLsync, glCreateSyncFromCLeventARB,struct _cl_context *context, struct _cl_event *event, GLbitfield flags); STUB_FUNCTION_END_NO_RETURN(GLsync, glCreateSyncFromCLeventARB,context,event,flags)
 STUB_FUNCTION_HEAD(void, glClampColorARB, GLenum target, GLenum clamp); STUB_FUNCTION_END_NO_RETURN(void, glClampColorARB,target,clamp)
-STUB_FUNCTION_HEAD(void, glDispatchComputeGroupSizeARB, GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z, GLuint group_size_x, GLuint group_size_y, GLuint group_size_z); STUB_FUNCTION_END_NO_RETURN(void, glDispatchComputeGroupSizeARB,num_groups_x,num_groups_y,num_groups_z,group_size_x,group_size_y,group_size_z)
+// glDispatchComputeGroupSizeARB - ARB_compute_variable_group_size emulation
+// (see ComputeShader.cpp for the implementation)
+CPU_SIM_FUNCTION_HEAD(void, glDispatchComputeGroupSizeARB, GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z, GLuint group_size_x, GLuint group_size_y, GLuint group_size_z)
+    mgDispatchComputeGroupSizeARB(num_groups_x, num_groups_y, num_groups_z, group_size_x, group_size_y, group_size_z);
+CPU_SIM_FUNCTION_END_NO_RETURN(void, glDispatchComputeGroupSizeARB,num_groups_x,num_groups_y,num_groups_z,group_size_x,group_size_y,group_size_z)
 STUB_FUNCTION_HEAD(void, glProgramStringARB, GLenum target, GLenum format, GLsizei len, const void* string); STUB_FUNCTION_END_NO_RETURN(void, glProgramStringARB,target,format,len,string)
 STUB_FUNCTION_HEAD(void, glBindProgramARB, GLenum target, GLuint program); STUB_FUNCTION_END_NO_RETURN(void, glBindProgramARB,target,program)
 STUB_FUNCTION_HEAD(void, glDeleteProgramsARB, GLsizei n, const GLuint* programs); STUB_FUNCTION_END_NO_RETURN(void, glDeleteProgramsARB,n,programs)
