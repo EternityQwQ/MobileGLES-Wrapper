@@ -28,6 +28,10 @@ extern "C"
     GLAPI GLAPIENTRY void glGetIntegerv(GLenum pname, GLint* params);
     GLAPI GLAPIENTRY void glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params);
     GLAPI GLAPIENTRY void glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64* params);
+    GLAPI GLAPIENTRY void glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64* params);
+    GLAPI GLAPIENTRY void glGetQueryObjectivEXT(GLuint id, GLenum pname, GLint* params);
+    GLAPI GLAPIENTRY void glGetQueryObjecti64vEXT(GLuint id, GLenum pname, GLint64* params);
+    GLAPI GLAPIENTRY void glGetQueryObjectui64vEXT(GLuint id, GLenum pname, GLuint64* params);
 
     void AppendExtension(const char* ext);
     void InitGLESBaseExtensions();

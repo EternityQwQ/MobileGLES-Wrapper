@@ -501,7 +501,6 @@ STUB_FUNCTION_HEAD(void, glTexImage3DMultisample, GLenum target, GLsizei samples
 STUB_FUNCTION_HEAD(void, glBindFragDataLocationIndexed, GLuint program, GLuint colorNumber, GLuint index, const GLchar* name); STUB_FUNCTION_END_NO_RETURN(void, glBindFragDataLocationIndexed,program,colorNumber,index,name)
 STUB_FUNCTION_HEAD(GLint, glGetFragDataIndex, GLuint program, const GLchar* name); STUB_FUNCTION_END_NO_RETURN(GLint, glGetFragDataIndex,program,name)
 STUB_FUNCTION_HEAD(void, glQueryCounter, GLuint id, GLenum target); STUB_FUNCTION_END_NO_RETURN(void, glQueryCounter,id,target)
-STUB_FUNCTION_HEAD(void, glGetQueryObjectui64v, GLuint id, GLenum pname, GLuint64* params); STUB_FUNCTION_END_NO_RETURN(void, glGetQueryObjectui64v,id,pname,params)
 STUB_FUNCTION_HEAD(void, glVertexAttribP1ui, GLuint index, GLenum type, GLboolean normalized, GLuint value); STUB_FUNCTION_END_NO_RETURN(void, glVertexAttribP1ui,index,type,normalized,value)
 STUB_FUNCTION_HEAD(void, glVertexAttribP1uiv, GLuint index, GLenum type, GLboolean normalized, const GLuint* value); STUB_FUNCTION_END_NO_RETURN(void, glVertexAttribP1uiv,index,type,normalized,value)
 STUB_FUNCTION_HEAD(void, glVertexAttribP2ui, GLuint index, GLenum type, GLboolean normalized, GLuint value); STUB_FUNCTION_END_NO_RETURN(void, glVertexAttribP2ui,index,type,normalized,value)
@@ -1740,26 +1739,9 @@ STUB_FUNCTION_HEAD(GLboolean, glAreTexturesResidentEXT, GLsizei n, const GLuint*
 STUB_FUNCTION_HEAD(void, glPrioritizeTexturesEXT, GLsizei n, const GLuint* textures, const GLclampf* priorities); STUB_FUNCTION_END_NO_RETURN(void, glPrioritizeTexturesEXT,n,textures,priorities)
 STUB_FUNCTION_HEAD(void, glTextureNormalEXT, GLenum mode); STUB_FUNCTION_END_NO_RETURN(void, glTextureNormalEXT,mode)
 STUB_FUNCTION_HEAD(void, glTexStorage1DEXT, GLenum target, GLsizei levels, GLenum internalformat, GLsizei width); STUB_FUNCTION_END_NO_RETURN(void, glTexStorage1DEXT,target,levels,internalformat,width)
-// GL_EXT_disjoint_timer_query: forward to GLES function pointers
+// GL_EXT_disjoint_timer_query: glQueryCounterEXT has no GLES equivalent
 extern "C" GLAPI GLAPIENTRY void glQueryCounterEXT(GLuint id, GLenum target) {
-    // No GLES equivalent for glQueryCounter; core GL stub is also a no-op
-}
-extern "C" GLAPI GLAPIENTRY void glGetQueryObjectivEXT(GLuint id, GLenum pname, GLint* params) {
-    if (GLES.glGetQueryObjectivEXT) {
-        GLES.glGetQueryObjectivEXT(id, pname, params);
-    }
-}
-extern "C" GLAPI GLAPIENTRY void glGetQueryObjecti64vEXT(GLuint id, GLenum pname, GLint64* params) {
-    if (GLES.glGetQueryObjecti64vEXT) {
-        GLES.glGetQueryObjecti64vEXT(id, pname, params);
-    }
-}
-extern "C" GLAPI GLAPIENTRY void glGetQueryObjectui64vEXT(GLuint id, GLenum pname, GLuint64* params) {
-    if (GLES.glGetQueryObjecti64vEXT) {
-        GLint64 v;
-        GLES.glGetQueryObjecti64vEXT(id, pname, &v);
-        *params = (GLuint64)v;
-    }
+    // No GLES equivalent; core GL also a stub
 }
 STUB_FUNCTION_HEAD(void, glBindBufferOffsetEXT, GLenum target, GLuint index, GLuint buffer, GLintptr offset); STUB_FUNCTION_END_NO_RETURN(void, glBindBufferOffsetEXT,target,index,buffer,offset)
 STUB_FUNCTION_HEAD(void, glArrayElementEXT, GLint i); STUB_FUNCTION_END_NO_RETURN(void, glArrayElementEXT,i)

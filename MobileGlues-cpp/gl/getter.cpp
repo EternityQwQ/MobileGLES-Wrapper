@@ -609,3 +609,40 @@ void glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64* params) {
         CHECK_GL_ERROR
     }
 }
+
+void glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64* params) {
+    LOG()
+    if (GLES.glGetQueryObjecti64vEXT) {
+        GLint64 v;
+        GLES.glGetQueryObjecti64vEXT(id, pname, &v);
+        *params = (GLuint64)v;
+        CHECK_GL_ERROR
+    }
+}
+
+// GL_EXT_disjoint_timer_query — forwarded to GLES
+void glGetQueryObjectivEXT(GLuint id, GLenum pname, GLint* params) {
+    LOG()
+    if (GLES.glGetQueryObjectivEXT) {
+        GLES.glGetQueryObjectivEXT(id, pname, params);
+        CHECK_GL_ERROR
+    }
+}
+
+void glGetQueryObjecti64vEXT(GLuint id, GLenum pname, GLint64* params) {
+    LOG()
+    if (GLES.glGetQueryObjecti64vEXT) {
+        GLES.glGetQueryObjecti64vEXT(id, pname, params);
+        CHECK_GL_ERROR
+    }
+}
+
+void glGetQueryObjectui64vEXT(GLuint id, GLenum pname, GLuint64* params) {
+    LOG()
+    if (GLES.glGetQueryObjecti64vEXT) {
+        GLint64 v;
+        GLES.glGetQueryObjecti64vEXT(id, pname, &v);
+        *params = (GLuint64)v;
+        CHECK_GL_ERROR
+    }
+}
