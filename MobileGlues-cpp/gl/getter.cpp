@@ -212,7 +212,9 @@ void InitGLESBaseExtensions() {
         }
     }
 
+    // Pre-allocate capacity to avoid reallocations during AppendExtension calls
     es_ext.clear();
+    es_ext.reserve(4096);
     for (const auto& ext : extensions) {
         es_ext += ext;
         es_ext += " ";
