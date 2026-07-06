@@ -14,6 +14,9 @@
 #include "texture.h"
 #include <utility>
 
+// Extern from drawing.cpp: CPU-side tracked GL_TEXTURE_2D binding per unit
+extern GLuint g_tracked_tex2d_binding[32];
+
 #define DEBUG 0
 
 // ============================================================================
