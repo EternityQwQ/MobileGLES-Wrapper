@@ -7,6 +7,10 @@
 #include "FSR1.h"
 #include "FSRShaderSource.h"
 #include "../../config/settings.h"
+#include "../buffer.h"
+
+// Extern from drawing.cpp: CPU-side tracked GL_TEXTURE_2D binding per unit
+extern GLuint g_tracked_tex2d_binding[32];
 
 #define DEBUG 0
 
@@ -21,17 +25,18 @@ struct GLStateGuard {
     GLint prevDrawFBO;
     GLint prevRenderbuffer;
 
+    // Use CPU-side cached state instead of glGetIntegerv GPU round-trips
     GLStateGuard() {
-        GLES.glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
-        GLES.glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVAO);
-        GLES.glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevArrayBuffer);
-        GLES.glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActiveTexture);
+        prevProgram = GLState.currentProgram;
+        prevVAO = (GLint)find_bound_array();
+        prevArrayBuffer = (GLint)find_bound_buffer(GL_ARRAY_BUFFER_BINDING);
+        prevActiveTexture = GL_TEXTURE0 + GLState.currentTexUnit;
         GLES.glActiveTexture(prevActiveTexture);
-        GLES.glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTexture);
+        prevTexture = g_tracked_tex2d_binding[GLState.currentTexUnit];
         // GLES.glGetIntegerv(GL_VIEWPORT, prevViewport);
-        GLES.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFBO);
-        GLES.glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFBO);
-        GLES.glGetIntegerv(GL_RENDERBUFFER_BINDING, &prevRenderbuffer);
+        prevReadFBO = GLState.framebuffer.readFBO;
+        prevDrawFBO = GLState.framebuffer.drawFBO;
+        prevRenderbuffer = 0; // Not tracked in CPU cache, skip
     }
 
     ~GLStateGuard() {

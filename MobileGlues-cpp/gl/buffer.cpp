@@ -14,6 +14,9 @@
 #include "texture.h"
 #include <utility>
 
+// Extern from drawing.cpp: CPU-side tracked GL_TEXTURE_2D binding per unit
+extern GLuint g_tracked_tex2d_binding[32];
+
 #define DEBUG 0
 
 // ============================================================================
@@ -700,7 +703,8 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
         GLint prev_pixel_buffer_binding = 0;
 
         GLES.glActiveTexture(GL_TEXTURE0 + 15);
-        GLES.glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
+        // Use CPU-side tracking instead of glGetIntegerv GPU round-trip
+        boundTexture = g_tracked_tex2d_binding[15];
         LOG_D("Current GL_TEXTURE_BINDING_BUFFER = %d", boundTexture);
 
         if (!boundTexture) {
@@ -709,19 +713,17 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
             return;
         }
 
-        // Save pixel unpack state
-        GLint prev_alignment, prev_row_length, prev_skip_pixels, prev_skip_rows;
-        GLES.glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &prev_pixel_buffer_binding);
-        GLES.glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_alignment);
-        GLES.glGetIntegerv(GL_UNPACK_ROW_LENGTH, &prev_row_length);
-        GLES.glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &prev_skip_pixels);
-        GLES.glGetIntegerv(GL_UNPACK_SKIP_ROWS, &prev_skip_rows);
+        // Save pixel unpack state from CPU-side cache (avoids 5 glGetIntegerv GPU round-trips)
+        GLint prev_alignment = GLState.texture.unpackAlignment;
+        GLint prev_row_length = GLState.texture.unpackRowLength;
+        GLint prev_skip_pixels = GLState.texture.unpackSkipPixels;
+        GLint prev_skip_rows = GLState.texture.unpackSkipRows;
+        prev_pixel_buffer_binding = find_bound_buffer(GL_PIXEL_UNPACK_BUFFER_BINDING);
 
-        // Bind PBO and query buffer size
+        // Bind PBO and query buffer size from CPU-side cache (avoids glGetBufferParameteriv GPU round-trip)
         GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, real_buffer);
-        GLint bufferSize;
-        GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &bufferSize);
-        LOG_D("Buffer size = %d bytes", bufferSize);
+        GLint bufferSize = (GLint)get_buffer_data_size(buffer);
+        LOG_D("Buffer size = %d bytes (cached)", bufferSize);
 
         const GLuint MAX_WIDTH = 8192;
         GLuint pixelSize = get_internal_format_size(internalformat);
@@ -772,6 +774,9 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
         // Restore GL state
         GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, prev_pixel_buffer_binding);
         GLES.glActiveTexture(GL_TEXTURE0 + gl_state->current_tex_unit);
+
+        // Mark TBO uniforms as dirty so PREPARE_FOR_DRAW will sync them
+        GLState.buffer.texBuffersDirty = true;
 
         CHECK_GL_ERROR;
         return;

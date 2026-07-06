@@ -669,10 +669,10 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
           border, glEnumToString(format), glEnumToString(type), pixels)
     GLenum rtarget = map_tex_target(target);
     if (rtarget == GL_PROXY_TEXTURE_2D) {
-        int max1 = 4096;
-        GLES.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max1);
-        set_gl_state_proxy_width(((width << level) > max1) ? 0 : width);
-        set_gl_state_proxy_height(((height << level) > max1) ? 0 : height);
+        static int maxTexSize = -1;
+        if (maxTexSize < 0) GLES.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexSize);
+        set_gl_state_proxy_width(((width << level) > maxTexSize) ? 0 : width);
+        set_gl_state_proxy_height(((height << level) > maxTexSize) ? 0 : height);
         set_gl_state_proxy_intformat(internalFormat);
         return;
     }
@@ -736,10 +736,10 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
     internalFormat = (GLint)internalFormat_mut;
     GLenum rtarget = map_tex_target(target);
     if (rtarget == GL_PROXY_TEXTURE_3D) {
-        int max1 = 4096;
-        GLES.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max1);
-        set_gl_state_proxy_width(((width << level) > max1) ? 0 : width);
-        set_gl_state_proxy_height(((height << level) > max1) ? 0 : height);
+        static int maxTexSize3D = -1;
+        if (maxTexSize3D < 0) GLES.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexSize3D);
+        set_gl_state_proxy_width(((width << level) > maxTexSize3D) ? 0 : width);
+        set_gl_state_proxy_height(((height << level) > maxTexSize3D) ? 0 : height);
         set_gl_state_proxy_intformat(internalFormat);
         return;
     }
@@ -951,14 +951,14 @@ void glCopyTexImage2D(GLenum target, GLint level, GLenum internalFormat, GLint x
         internal_convert(&internalFormat, &type, &format);
         GLES.glTexImage2D(target, level, (GLint)internalFormat, width, height, border, format, type, nullptr);
         CHECK_GL_ERROR_NO_INIT
-        GLint prevDrawFBO;
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFBO);
+        // Use CPU-side cached FBO bindings instead of glGetIntegerv GPU round-trips
+        GLint prevDrawFBO = GLState.framebuffer.drawFBO;
         CHECK_GL_ERROR_NO_INIT
         GLuint tempDrawFBO = acquireTempFBO();
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, tempDrawFBO);
         CHECK_GL_ERROR_NO_INIT
-        GLint currentTex;
-        glGetIntegerv(get_binding_for_target(target), &currentTex);
+        // Use CPU-side tracked texture binding instead of glGetIntegerv
+        GLint currentTex = g_tracked_tex2d_binding[GetCurrentTextureUnitIndex()];
         CHECK_GL_ERROR_NO_INIT
         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, target, currentTex, level);
         CHECK_GL_ERROR_NO_INIT
@@ -1009,15 +1009,21 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
           glEnumToString(target), level, xoffset, yoffset, x, y, width, height)
 
     if (is_depth_format((GLenum)internalFormat)) {
-        GLint prevReadFBO, prevDrawFBO;
-        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFBO);
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFBO);
+        // Use CPU-side cached FBO bindings instead of glGetIntegerv GPU round-trips
+        GLint prevReadFBO = GLState.framebuffer.readFBO;
+        GLint prevDrawFBO = GLState.framebuffer.drawFBO;
 
         GLuint tempDrawFBO = acquireTempFBO();
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, tempDrawFBO);
 
         GLint currentTex;
-        glGetIntegerv(get_binding_for_target(target), &currentTex);
+        // Use CPU-side tracked texture binding for 2D (common case),
+        // fall back to glGetIntegerv for cubemap targets
+        if (target == GL_TEXTURE_2D) {
+            currentTex = g_tracked_tex2d_binding[GetCurrentTextureUnitIndex()];
+        } else {
+            glGetIntegerv(get_binding_for_target(target), &currentTex);
+        }
         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, target, currentTex, level);
 
         if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) [[unlikely]] {
@@ -1250,10 +1256,9 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, void*
     LOG()
     LOG_D("glGetTexImage, target: 0x%x, level: %d, format: 0x%x, type: 0x%x, pixels: 0x%x", target, level, format, type,
           pixels)
-    GLint prevDrawFBO;
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFBO);
-    GLint prevReadFBO;
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFBO);
+    // Use CPU-side cached FBO bindings instead of glGetIntegerv GPU round-trips
+    GLint prevDrawFBO = GLState.framebuffer.drawFBO;
+    GLint prevReadFBO = GLState.framebuffer.readFBO;
 
     GLuint tempFBO = acquireTempFBO();
     glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
@@ -1271,7 +1276,13 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, void*
         releaseTempFBO(tempFBO);
         return;
     }
-    glGetIntegerv(textureBindingTarget, &textureId);
+    // Use CPU-side tracked texture binding for 2D (common case),
+    // fall back to glGetIntegerv for cubemap targets
+    if (textureBindingTarget == GL_TEXTURE_BINDING_2D) {
+        textureId = g_tracked_tex2d_binding[GetCurrentTextureUnitIndex()];
+    } else {
+        glGetIntegerv(textureBindingTarget, &textureId);
+    }
 
     if (textureId == 0) {
         LOG_E("glGetTexImage: No texture bound to the specified target.")
@@ -1359,9 +1370,10 @@ void glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, co
     LOG()
     LOG_D("glClearTexImage, texture: %d, level: %d, format: %d, type: %d", texture, level, format, type)
     INIT_CHECK_GL_ERROR_FORCE
-    GLuint fbo, prevDrawFBO, prevReadFBO;
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, (int*)&prevDrawFBO);
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, (int*)&prevReadFBO);
+    // Use CPU-side cached FBO bindings instead of glGetIntegerv GPU round-trips
+    GLuint fbo;
+    GLint prevDrawFBO = GLState.framebuffer.drawFBO;
+    GLint prevReadFBO = GLState.framebuffer.readFBO;
     fbo = acquireTempFBO();
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     CHECK_GL_ERROR_NO_INIT
@@ -1424,6 +1436,22 @@ void glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, co
 void glPixelStorei(GLenum pname, GLint param) {
     LOG_D("glPixelStorei, pname = %s, param = %d", glEnumToString(pname), param)
     GLES.glPixelStorei(pname, param);
+    // Keep CPU-side cache in sync to avoid glGetIntegerv GPU round-trips
+    switch (pname) {
+        case GL_UNPACK_ALIGNMENT:  GLState.texture.unpackAlignment = param;  break;
+        case GL_UNPACK_ROW_LENGTH: GLState.texture.unpackRowLength = param;  break;
+        case GL_UNPACK_IMAGE_HEIGHT: GLState.texture.unpackImageHeight = param; break;
+        case GL_UNPACK_SKIP_PIXELS: GLState.texture.unpackSkipPixels = param; break;
+        case GL_UNPACK_SKIP_ROWS:  GLState.texture.unpackSkipRows = param;  break;
+        case GL_UNPACK_SKIP_IMAGES: GLState.texture.unpackSkipImages = param; break;
+        case GL_PACK_ALIGNMENT:    GLState.texture.packAlignment = param;    break;
+        case GL_PACK_ROW_LENGTH:   GLState.texture.packRowLength = param;    break;
+        case GL_PACK_IMAGE_HEIGHT: GLState.texture.packImageHeight = param;  break;
+        case GL_PACK_SKIP_PIXELS:  GLState.texture.packSkipPixels = param;   break;
+        case GL_PACK_SKIP_ROWS:    GLState.texture.packSkipRows = param;     break;
+        case GL_PACK_SKIP_IMAGES:  GLState.texture.packSkipImages = param;   break;
+        default: break;
+    }
     CHECK_GL_ERROR
 }
 

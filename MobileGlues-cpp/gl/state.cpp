@@ -86,6 +86,7 @@ void GLStateManager::BufferState::Reset()
     memset(atomicCounterBases, 0, sizeof(atomicCounterBases));
     memset(transformFeedbackBuffers, 0, sizeof(transformFeedbackBuffers));
     texBuffers.clear();
+    texBuffersDirty = false;
     bufferMaps.clear();
     atomicCounterData.clear();
     atomicCounterBufferBinding = 0;

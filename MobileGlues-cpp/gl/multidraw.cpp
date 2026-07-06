@@ -30,6 +30,7 @@
 
 #include "multidraw.h"
 #include "../config/settings.h"
+#include "buffer.h"
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -132,7 +133,8 @@ static constexpr GLsizei kDefaultIndirectCmdBufSize = 256;
 
 void prepare_indirect_buffer(const GLsizei* counts, GLenum type, const void* const* indices, GLsizei primcount,
                              const GLint* basevertex) {
-    GLES.glGetIntegerv(GL_DRAW_INDIRECT_BUFFER_BINDING, (GLint*)&prevIndirectBuffer);
+    // Use CPU-side cached binding instead of glGetIntegerv GPU round-trip
+    prevIndirectBuffer = find_bound_buffer(GL_DRAW_INDIRECT_BUFFER_BINDING);
 
     if (!g_indirect_cmds_inited) {
         GLES.glGenBuffers(1, &g_indirectbuffer);
@@ -217,8 +219,8 @@ void mg_glMultiDrawElementsBaseVertex_drawelements(GLenum mode, const GLsizei* c
                                                    const GLint* basevertex) {
     PREPARE_FOR_DRAW();
 
-    GLint prevElementBuffer;
-    GLES.glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &prevElementBuffer);
+    // Use CPU-side cached binding instead of glGetIntegerv GPU round-trip
+    GLint prevElementBuffer = (GLint)find_bound_buffer(GL_ELEMENT_ARRAY_BUFFER_BINDING);
 
     // Reusable thread_local temp buffer and memory to avoid per-draw allocation
     static thread_local GLuint tempBuffer = 0;
@@ -648,8 +650,8 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, cons
     // -------------------------------------------------------------------------
     // Validate element array buffer
     // -------------------------------------------------------------------------
-    GLint ibo = 0;
-    GLES.glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &ibo);
+    // Use CPU-side cached binding instead of glGetIntegerv GPU round-trip
+    GLint ibo = (GLint)find_bound_buffer(GL_ELEMENT_ARRAY_BUFFER_BINDING);
     CHECK_GL_ERROR_NO_INIT
     if (ibo == 0) {
         LOG_D("mg_glMultiDrawElementsBaseVertex_compute: no element array buffer bound, fallback")
@@ -736,8 +738,8 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, cons
     // -------------------------------------------------------------------------
     // Save GL state before compute dispatch
     // -------------------------------------------------------------------------
-    GLint prev_ssbo_binding = 0;
-    GLES.glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &prev_ssbo_binding);
+    // Use CPU-side cached bindings instead of glGetIntegerv GPU round-trips
+    GLint prev_ssbo_binding = (GLint)find_bound_buffer(GL_SHADER_STORAGE_BUFFER_BINDING);
     CHECK_GL_ERROR_NO_INIT
 
     // -------------------------------------------------------------------------
@@ -786,11 +788,10 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, cons
     GLES.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, g_outputibo);
     CHECK_GL_ERROR_NO_INIT
 
-    GLint prev_program = 0;
-    GLES.glGetIntegerv(GL_CURRENT_PROGRAM, &prev_program);
+    // Use CPU-side cached state instead of glGetIntegerv GPU round-trips
+    GLint prev_program = GLState.currentProgram;
     CHECK_GL_ERROR_NO_INIT
-    GLint prev_vb = 0;
-    GLES.glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev_vb);
+    GLint prev_vb = (GLint)find_bound_buffer(GL_ARRAY_BUFFER_BINDING);
     CHECK_GL_ERROR_NO_INIT
 
     // -------------------------------------------------------------------------

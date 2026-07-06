@@ -158,6 +158,11 @@ void glUseProgram(GLuint program) {
     GLES.glUseProgram(program);
     // Notify compute shader module of program change (for work group size tracking)
     ComputeShader_OnUseProgram(program);
+    // Invalidate TBO uniform caches: different programs have different uniform locations.
+    // Mark dirty so PREPARE_FOR_DRAW will re-query uniforms on next draw call.
+    if (!GLState.buffer.texBuffers.empty()) {
+        GLState.buffer.texBuffersDirty = true;
+    }
 }
 
 // ============================================================================
