@@ -100,23 +100,27 @@ extern "C" void mgDispatchComputeGroupSizeARB(GLuint num_groups_x, GLuint num_gr
                                               GLuint num_groups_z,
                                               GLuint group_size_x, GLuint group_size_y,
                                               GLuint group_size_z) {
-    // If we have a valid program with a compute shader, adjust groups
-    if (compute_shader_local_size_valid) {
-        // Compute the total number of threads requested
-        GLuint total_x = num_groups_x * group_size_x;
-        GLuint total_y = num_groups_y * group_size_y;
-        GLuint total_z = num_groups_z * group_size_z;
-
-        // Adjust groups to match the shader's fixed local size
-        GLuint adj_x = (total_x + compute_shader_local_size[0] - 1) / compute_shader_local_size[0];
-        GLuint adj_y = (total_y + compute_shader_local_size[1] - 1) / compute_shader_local_size[1];
-        GLuint adj_z = (total_z + compute_shader_local_size[2] - 1) / compute_shader_local_size[2];
-
-        GLES.glDispatchCompute(adj_x, adj_y, adj_z);
-    } else {
-        // No compute program or unknown work group size - use the shader's
-        // default local size. This passes through directly since we can't
-        // adjust without knowing the local size.
+    if (!compute_shader_local_size_valid) {
+        // No compute program or unknown work group size - dispatch directly
         GLES.glDispatchCompute(num_groups_x, num_groups_y, num_groups_z);
+        return;
     }
+
+    // Fast path: if the requested group size matches the shader's compiled
+    // local size, dispatch directly without adjustment math overhead
+    if (group_size_x == (GLuint)compute_shader_local_size[0] &&
+        group_size_y == (GLuint)compute_shader_local_size[1] &&
+        group_size_z == (GLuint)compute_shader_local_size[2]) {
+        GLES.glDispatchCompute(num_groups_x, num_groups_y, num_groups_z);
+        return;
+    }
+
+    // Slow path: adjust group count to match the shader's fixed local size.
+    // total_invocations = num_groups * group_size
+    // adjusted_groups = ceil(total_invocations / local_size)
+    GLuint adj_x = (num_groups_x * group_size_x + compute_shader_local_size[0] - 1) / compute_shader_local_size[0];
+    GLuint adj_y = (num_groups_y * group_size_y + compute_shader_local_size[1] - 1) / compute_shader_local_size[1];
+    GLuint adj_z = (num_groups_z * group_size_z + compute_shader_local_size[2] - 1) / compute_shader_local_size[2];
+
+    GLES.glDispatchCompute(adj_x, adj_y, adj_z);
 }

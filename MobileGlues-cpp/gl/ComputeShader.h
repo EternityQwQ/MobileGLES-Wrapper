@@ -50,9 +50,10 @@ void ComputeShader_OnUseProgram(GLuint program);
 //   group_size_x/y/z - desired local work group size per dimension
 //
 // Implementation:
-//   1. total_threads = num_groups * group_size
-//   2. adjusted_groups = ceil(total_threads / shader_local_size)
-//   3. glDispatchCompute(adjusted_groups)
+//   1. Fast path: if group_size == shader_local_size, dispatch directly
+//   2. total_threads = num_groups * group_size
+//   3. adjusted_groups = ceil(total_threads / shader_local_size)
+//   4. glDispatchCompute(adjusted_groups)
 void mgDispatchComputeGroupSizeARB(GLuint num_groups_x, GLuint num_groups_y,
                                    GLuint num_groups_z,
                                    GLuint group_size_x, GLuint group_size_y,
