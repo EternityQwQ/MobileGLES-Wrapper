@@ -649,13 +649,9 @@ void glActiveTexture(GLenum texture) {
         return;
     }
 
-    int unit = texture - GL_TEXTURE0;
-    // Skip GLES call if this texture unit is already active (avoids driver overhead)
-    if (unit == GetCurrentTextureUnitIndex()) return;
-
-    set_gl_state_current_tex_unit(unit);
+    set_gl_state_current_tex_unit(texture - GL_TEXTURE0);
     GLES.glActiveTexture(texture);
-    ActivateTextureUnit(unit);
+    ActivateTextureUnit(texture - GL_TEXTURE0);
     CHECK_GL_ERROR
 }
 
@@ -1449,23 +1445,23 @@ void glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, co
 
 void glPixelStorei(GLenum pname, GLint param) {
     LOG_D("glPixelStorei, pname = %s, param = %d", glEnumToString(pname), param)
-    // Skip GLES call if the parameter hasn't changed (avoids driver overhead)
+    GLES.glPixelStorei(pname, param);
+    // Keep CPU-side cache in sync to avoid glGetIntegerv GPU round-trips
     switch (pname) {
-        case GL_UNPACK_ALIGNMENT:  if (GLState.texture.unpackAlignment == param) return; GLState.texture.unpackAlignment = param; break;
-        case GL_UNPACK_ROW_LENGTH: if (GLState.texture.unpackRowLength == param) return; GLState.texture.unpackRowLength = param; break;
-        case GL_UNPACK_IMAGE_HEIGHT: if (GLState.texture.unpackImageHeight == param) return; GLState.texture.unpackImageHeight = param; break;
-        case GL_UNPACK_SKIP_PIXELS: if (GLState.texture.unpackSkipPixels == param) return; GLState.texture.unpackSkipPixels = param; break;
-        case GL_UNPACK_SKIP_ROWS:  if (GLState.texture.unpackSkipRows == param) return; GLState.texture.unpackSkipRows = param; break;
-        case GL_UNPACK_SKIP_IMAGES: if (GLState.texture.unpackSkipImages == param) return; GLState.texture.unpackSkipImages = param; break;
-        case GL_PACK_ALIGNMENT:    if (GLState.texture.packAlignment == param) return; GLState.texture.packAlignment = param; break;
-        case GL_PACK_ROW_LENGTH:   if (GLState.texture.packRowLength == param) return; GLState.texture.packRowLength = param; break;
-        case GL_PACK_IMAGE_HEIGHT: if (GLState.texture.packImageHeight == param) return; GLState.texture.packImageHeight = param; break;
-        case GL_PACK_SKIP_PIXELS:  if (GLState.texture.packSkipPixels == param) return; GLState.texture.packSkipPixels = param; break;
-        case GL_PACK_SKIP_ROWS:    if (GLState.texture.packSkipRows == param) return; GLState.texture.packSkipRows = param; break;
-        case GL_PACK_SKIP_IMAGES:  if (GLState.texture.packSkipImages == param) return; GLState.texture.packSkipImages = param; break;
+        case GL_UNPACK_ALIGNMENT:  GLState.texture.unpackAlignment = param;  break;
+        case GL_UNPACK_ROW_LENGTH: GLState.texture.unpackRowLength = param;  break;
+        case GL_UNPACK_IMAGE_HEIGHT: GLState.texture.unpackImageHeight = param; break;
+        case GL_UNPACK_SKIP_PIXELS: GLState.texture.unpackSkipPixels = param; break;
+        case GL_UNPACK_SKIP_ROWS:  GLState.texture.unpackSkipRows = param;  break;
+        case GL_UNPACK_SKIP_IMAGES: GLState.texture.unpackSkipImages = param; break;
+        case GL_PACK_ALIGNMENT:    GLState.texture.packAlignment = param;    break;
+        case GL_PACK_ROW_LENGTH:   GLState.texture.packRowLength = param;    break;
+        case GL_PACK_IMAGE_HEIGHT: GLState.texture.packImageHeight = param;  break;
+        case GL_PACK_SKIP_PIXELS:  GLState.texture.packSkipPixels = param;   break;
+        case GL_PACK_SKIP_ROWS:    GLState.texture.packSkipRows = param;     break;
+        case GL_PACK_SKIP_IMAGES:  GLState.texture.packSkipImages = param;   break;
         default: break;
     }
-    GLES.glPixelStorei(pname, param);
     CHECK_GL_ERROR
 }
 

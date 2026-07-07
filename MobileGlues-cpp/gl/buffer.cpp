@@ -312,35 +312,12 @@ void glGenBuffers(GLsizei n, GLuint* buffers) {
     }
 }
 
-// Binding caches for dirty-check optimization — declared here so glDeleteBuffers
-// can invalidate them when buffers are deleted.
-static GLuint g_last_gles_bound_buffer[BINDING_COUNT] = {0};
-static std::unordered_map<GLenum, std::unordered_map<GLuint, GLuint>> g_last_bound_range;
-static std::unordered_map<GLuint, GLuint> g_last_bound_vertex_buffer;
-
 void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     LOG()
     LOG_D("glDeleteBuffers(%i, %p)", n, buffers)
     for (int i = 0; i < n; ++i) {
         auto [real_buff, exists] = find_real_buffer_with_exists(buffers[i]);
         if (exists) {
-            // Invalidate binding caches: if any target was tracking this real buffer,
-            // reset it to force the next glBindBuffer to actually call the driver.
-            for (int j = 0; j < BINDING_COUNT; ++j) {
-                if (g_last_gles_bound_buffer[j] == real_buff) {
-                    g_last_gles_bound_buffer[j] = 0;
-                }
-            }
-            // Invalidate range/base binding caches
-            for (auto& [target, idx_map] : g_last_bound_range) {
-                for (auto& [idx, cached] : idx_map) {
-                    if (cached == real_buff) cached = 0;
-                }
-            }
-            // Invalidate vertex buffer binding cache
-            for (auto& [idx, cached] : g_last_bound_vertex_buffer) {
-                if (cached == real_buff) cached = 0;
-            }
             GLES.glDeleteBuffers(1, &real_buff);
             CHECK_GL_ERROR
         }
@@ -368,11 +345,6 @@ void glBindBuffer(GLenum target, GLuint buffer) {
     }
 
     if (buffer == 0) [[unlikely]] {
-        int idx = binding_target_to_index(target);
-        if (idx >= 0) {
-            if (g_last_gles_bound_buffer[idx] == 0) return; // already 0
-            g_last_gles_bound_buffer[idx] = 0;
-        }
         GLES.glBindBuffer(target, buffer);
         CHECK_GL_ERROR
         return;
@@ -387,12 +359,6 @@ void glBindBuffer(GLenum target, GLuint buffer) {
         GLES.glGenBuffers(1, &real_buffer);
         modify_buffer_direct(buffer, real_buffer);
         CHECK_GL_ERROR
-    }
-    // Skip GLES call if the same real buffer is already bound to this target
-    int idx = binding_target_to_index(target);
-    if (idx >= 0) {
-        if (g_last_gles_bound_buffer[idx] == real_buffer) return;
-        g_last_gles_bound_buffer[idx] = real_buffer;
     }
     LOG_D("glBindBuffer: %d -> %d", buffer, real_buffer)
     GLES.glBindBuffer(target, real_buffer);
@@ -498,15 +464,6 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offs
           index, buffer, (void*)offset, size)
 
     if (buffer == 0) {
-        // Skip if already unbound at this index
-        auto it_target = g_last_bound_range.find(target);
-        if (it_target != g_last_bound_range.end()) {
-            auto it_idx = it_target->second.find(index);
-            if (it_idx != it_target->second.end() && it_idx->second == 0) return;
-            it_target->second[index] = 0;
-        } else {
-            g_last_bound_range[target][index] = 0;
-        }
         GLES.glBindBufferRange(target, index, buffer, offset, size);
         CHECK_GL_ERROR
         return;
@@ -522,14 +479,6 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offs
         modify_buffer_direct(buffer, real_buffer);
         CHECK_GL_ERROR
     }
-    // Skip GLES call if same real buffer already bound at this (target, index)
-    auto it_target = g_last_bound_range.find(target);
-    if (it_target != g_last_bound_range.end()) {
-        auto it_idx = it_target->second.find(index);
-        if (it_idx != it_target->second.end() && it_idx->second == real_buffer) return;
-    }
-    g_last_bound_range[target][index] = real_buffer;
-
     GLES.glBindBufferRange(target, index, real_buffer, offset, size);
     if (target == GL_ATOMIC_COUNTER_BUFFER) {
         if (g_buffer_map_atomic_buffer_info.empty()) {
@@ -545,14 +494,6 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     LOG_D("glBindBufferBase, target = %s, index = %d, buffer = %d", glEnumToString(target), index, buffer)
 
     if (buffer == 0) {
-        auto it_target = g_last_bound_range.find(target);
-        if (it_target != g_last_bound_range.end()) {
-            auto it_idx = it_target->second.find(index);
-            if (it_idx != it_target->second.end() && it_idx->second == 0) return;
-            it_target->second[index] = 0;
-        } else {
-            g_last_bound_range[target][index] = 0;
-        }
         GLES.glBindBufferBase(target, index, buffer);
         CHECK_GL_ERROR
         return;
@@ -568,14 +509,6 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
         modify_buffer_direct(buffer, real_buffer);
         CHECK_GL_ERROR
     }
-    // Skip GLES call if same real buffer already bound at this (target, index)
-    auto it_target = g_last_bound_range.find(target);
-    if (it_target != g_last_bound_range.end()) {
-        auto it_idx = it_target->second.find(index);
-        if (it_idx != it_target->second.end() && it_idx->second == real_buffer) return;
-    }
-    g_last_bound_range[target][index] = real_buffer;
-
     GLES.glBindBufferBase(target, index, real_buffer);
     if (target == GL_SHADER_STORAGE_BUFFER) {
         if (g_buffer_map_ssbo_id.empty()) {
@@ -595,9 +528,6 @@ void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLs
     LOG_D("glBindVertexBuffer, bindingindex = %d, buffer = %d, offset = %p, stride = %i", bindingindex, buffer, offset,
           stride)
     if (buffer == 0) [[unlikely]] {
-        auto it = g_last_bound_vertex_buffer.find(bindingindex);
-        if (it != g_last_bound_vertex_buffer.end() && it->second == 0) return;
-        g_last_bound_vertex_buffer[bindingindex] = 0;
         GLES.glBindVertexBuffer(bindingindex, buffer, offset, stride);
         CHECK_GL_ERROR
         return;
@@ -613,10 +543,6 @@ void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLs
         modify_buffer_direct(buffer, real_buffer);
         CHECK_GL_ERROR
     }
-    // Skip GLES call if same real buffer already bound at this index
-    auto it = g_last_bound_vertex_buffer.find(bindingindex);
-    if (it != g_last_bound_vertex_buffer.end() && it->second == real_buffer) return;
-    g_last_bound_vertex_buffer[bindingindex] = real_buffer;
     GLES.glBindVertexBuffer(bindingindex, real_buffer, offset, stride);
     CHECK_GL_ERROR
 }
