@@ -600,14 +600,33 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
 //
 // TBO attaches a buffer object's data store to a texture buffer target.
 // Virtual buffer IDs are resolved to real GPU buffer IDs via the buffer map.
-// On ES 3.2, glTexBuffer/glTexBufferRange are natively supported — no emulation.
+// On ES 3.2, glTexBuffer/glTexBufferRange are natively supported.
+//
+// Safety: runtime function-pointer check — if the driver does not expose
+// glTexBuffer (e.g. incomplete ES 3.2 implementation), we log an error
+// and return gracefully rather than crashing.
 // ============================================================================
+
+static bool tbo_available() {
+    static bool checked = false;
+    static bool avail = false;
+    if (!checked) {
+        checked = true;
+        if (GLES.glTexBuffer == nullptr) {
+            LOG_E("glTexBuffer is not available on this driver — TBO unsupported");
+        } else {
+            avail = true;
+        }
+    }
+    return avail;
+}
 
 void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
     LOG()
     LOG_D("glTexBuffer, target = %s, internalformat = %s, buffer = %d", glEnumToString(target),
           glEnumToString(internalformat), buffer)
     if (target != GL_TEXTURE_BUFFER) return;
+    if (!tbo_available()) return;
 
     GLuint real_buffer = buffer;
     if (has_buffer(buffer) && buffer != 0) {
@@ -626,6 +645,7 @@ void glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLint
     LOG()
     LOG_D("glTexBufferRange, target = %s, internalformat = %s, buffer = %d, offset = %p, size = %zi",
           glEnumToString(target), glEnumToString(internalformat), buffer, (void*)offset, size)
+    if (!tbo_available()) return;
 
     GLuint real_buffer = buffer;
     if (has_buffer(buffer) && buffer != 0) {
