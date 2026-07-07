@@ -115,7 +115,6 @@ void* proc_address(void* lib, const char* name) {
 void set_hardware() {
     // ES 3.2-only: always set version to 320 — no per-version branching needed.
     GLState.esVersion = 320;
-    GLState.emulateTextureBuffer = false;  // ES 3.2 natively supports glTexBuffer
 }
 
 void init_gl_state() {

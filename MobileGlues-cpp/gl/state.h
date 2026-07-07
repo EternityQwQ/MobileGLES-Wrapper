@@ -108,11 +108,9 @@ public:
     // ------------------------------------------------------------------------
 
     int esVersion = 32;                    // OpenGL ES version (30 or 32)
-    bool emulateTextureBuffer = false;     // Whether TBO emulation is active
 
     // Backward-compatible aliases for old snake_case field names
     int &es_version = esVersion;
-    bool &emulate_texture_buffer = emulateTextureBuffer;
 
     // ------------------------------------------------------------------------
     // Proxy framebuffer state (for FSR1-style rendering)
@@ -157,21 +155,6 @@ public:
 
         // Transform feedback buffer bindings
         GLuint transformFeedbackBuffers[MAX_TRANSFORM_FEEDBACK_BUFFERS] = {};
-
-        // Texture buffer objects (for TBO emulation)
-        struct TexBufferSlot {
-            GLuint buffer = 0;
-            GLuint texture = 0;
-            GLenum internalFormat = 0;
-            GLint uniformLoc = -1;  // cached uniform location (invalidated on program change)
-            GLuint progId = 0;      // program ID for which uniformLoc was cached
-        };
-        UnorderedMap<GLuint, TexBufferSlot> texBuffers; // virtual buffer → {real buffer, tex}
-
-        // Dirty flag for TBO uniform updates: set to true when a texBuffer
-        // is created/modified; cleared by PREPARE_FOR_DRAW after uniforms are synced.
-        // Avoids iterating all texBuffers on every draw call when nothing changed.
-        bool texBuffersDirty = false;
 
         // Buffer map for glMapBufferRange
         UnorderedMap<GLuint, void*> bufferMaps;         // virtual → mapped pointer
@@ -514,49 +497,8 @@ private:
 // ============================================================================
 // Draw preparation macro
 // ============================================================================
-
-// This macro is called before every draw call to ensure sampler buffer
-// (texture buffer) uniforms are updated with the correct texture IDs.
-// The principle: texture buffers are emulated using regular textures,
-// and the sampler uniform needs to be set to the texture unit where
-// the emulated texture is bound.
 //
-// Optimization: uses a dirty flag (texBuffersDirty) to skip the entire
-// iteration when no TBO state has changed. The flag is set by glTexBuffer
-// when a TBO is created/modified, and cleared here after uniforms are synced.
-#define PREPARE_FOR_DRAW()                                                              \
-    do {                                                                                \
-        if (GLState.emulateTextureBuffer && GLState.buffer.texBuffersDirty) {           \
-            GLState.isDrawCall = true;                                                   \
-            GLint texUnit = GLState.currentTexUnit;                                      \
-            GLuint currentProg = GLState.currentProgram;                                 \
-            /* Activate the TBO texture unit once before the loop (avoids redundant     \
-               glActiveTexture calls that our dirty-check already handles, but moving   \
-               it out of the loop is cleaner and avoids even the check overhead) */     \
-            glActiveTexture(GL_TEXTURE0 + texUnit);                                      \
-            /* Update sampler buffer textures for TBO emulation */                      \
-            for (auto& pair : GLState.buffer.texBuffers) {                               \
-                GLuint virtualBuf = pair.first;                                          \
-                auto& slot = pair.second;                                                \
-                if (slot.texture && slot.buffer) {                                       \
-                    glBindTexture(GL_TEXTURE_2D, slot.texture);                          \
-                    /* Set sampler uniform via the current program if known */           \
-                    if (currentProg) {                                                   \
-                        /* Cache uniform location per program to avoid expensive         \
-                           glGetUniformLocation string lookup on every draw call */     \
-                        if (slot.uniformLoc < 0 || slot.progId != currentProg) {         \
-                            char buf[32];                                                \
-                            snprintf(buf, sizeof(buf), "mgTexBuf%u", virtualBuf);        \
-                            slot.uniformLoc = glGetUniformLocation(currentProg, buf);    \
-                            slot.progId = currentProg;                                   \
-                        }                                                                \
-                        if (slot.uniformLoc >= 0) glUniform1i(slot.uniformLoc, texUnit);  \
-                    }                                                                     \
-                }                                                                         \
-            }                                                                             \
-            /* Restore active texture unit once after all TBOs are processed */          \
-            glActiveTexture(GL_TEXTURE0 + texUnit);                                       \
-            GLState.buffer.texBuffersDirty = false;                                       \
-            GLState.isDrawCall = false;                                                   \
-        }                                                                                 \
-    } while (0)
+// Called before every draw call. Currently a no-op since TBO emulation
+// is no longer needed on ES 3.2 (native glTexBuffer/glTexBufferRange).
+// ============================================================================
+#define PREPARE_FOR_DRAW() ((void)0)

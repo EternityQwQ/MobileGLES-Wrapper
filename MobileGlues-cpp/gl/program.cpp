@@ -155,11 +155,6 @@ void glUseProgram(GLuint program) {
     GLState.shader.currentProgram = program;
     GLState.currentProgram = program;
     GLES.glUseProgram(program);
-    // Invalidate TBO uniform caches: different programs have different uniform locations.
-    // Mark dirty so PREPARE_FOR_DRAW will re-query uniforms on next draw call.
-    if (!GLState.buffer.texBuffers.empty()) {
-        GLState.buffer.texBuffersDirty = true;
-    }
 }
 
 // ============================================================================

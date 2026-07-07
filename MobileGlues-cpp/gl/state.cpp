@@ -37,9 +37,6 @@ void GLStateManager::Initialize()
     query.Reset();
     transformFeedback.Reset();
     renderbuffer.Reset();
-
-    // Detect if texture buffer is supported natively
-    emulateTextureBuffer = true; // Most mobile GPUs don't support TBO natively
 }
 
 void GLStateManager::Shutdown()
@@ -85,8 +82,6 @@ void GLStateManager::BufferState::Reset()
     memset(shaderStorageBases, 0, sizeof(shaderStorageBases));
     memset(atomicCounterBases, 0, sizeof(atomicCounterBases));
     memset(transformFeedbackBuffers, 0, sizeof(transformFeedbackBuffers));
-    texBuffers.clear();
-    texBuffersDirty = false;
     bufferMaps.clear();
     atomicCounterData.clear();
     atomicCounterBufferBinding = 0;

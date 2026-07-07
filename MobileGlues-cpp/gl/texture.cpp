@@ -32,9 +32,6 @@
 #include <vector>
 #include <unordered_map>
 
-// Extern references to TBO emulation caches in buffer.cpp (invalidated on texture deletion)
-extern std::unordered_map<GLuint, bool> g_tbo_texture_params_set;
-extern std::unordered_map<GLuint, std::pair<GLuint, GLuint>> g_tbo_texture_dims;
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -583,14 +580,7 @@ void glBindTexture(GLenum target, GLuint texture) {
 
     const int currentUnitIndex = GetCurrentTextureUnitIndex();
 
-    if (hardware && gl_state && hardware->emulate_texture_buffer && target == GL_TEXTURE_BUFFER) {
-        GLES.glActiveTexture(GL_TEXTURE0 + 15);
-        GLES.glBindTexture(GL_TEXTURE_2D, texture);
-        g_tracked_tex2d_binding[15] = texture;
-        GLES.glActiveTexture(GL_TEXTURE0 + gl_state->current_tex_unit);
-    } else {
-        GLES.glBindTexture(target, texture);
-    }
+    GLES.glBindTexture(target, texture);
     CHECK_GL_ERROR_NO_INIT
 
     // Track GL_TEXTURE_2D binding per-unit to avoid glGetIntegerv GPU queries
@@ -635,9 +625,6 @@ void glDeleteTextures(GLsizei n, const GLuint* textures) {
                 g_tracked_tex2d_binding[unit] = 0;
             }
         }
-        // Invalidate TBO emulation caches
-        g_tbo_texture_params_set.erase(textures[i]);
-        g_tbo_texture_dims.erase(textures[i]);
     }
 }
 

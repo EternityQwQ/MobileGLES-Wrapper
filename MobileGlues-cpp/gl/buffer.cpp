@@ -12,11 +12,6 @@
 #include "buffer.h"
 #include "ankerl/unordered_dense.h"
 #include "texture.h"
-#include <unordered_map>
-#include <utility>
-
-// Extern from drawing.cpp: CPU-side tracked GL_TEXTURE_2D binding per unit
-extern GLuint g_tracked_tex2d_binding[32];
 
 #define DEBUG 0
 
@@ -600,93 +595,13 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
 }
 
 // ============================================================================
-// Texture Buffer (ES 3.2 native, with CPU emulation fallback)
+// Texture Buffer Objects (ES 3.2 native)
 // ============================================================================
-
-// Sorted: internal format → pixel size in bytes
-struct InternalFormatSizeEntry {
-    GLenum key;
-    size_t value;
-};
-
-static const InternalFormatSizeEntry kInternalFormatSizes[] = {
-    {GL_RGB8,                3},
-    {GL_RGB16,               6},
-    {GL_RGBA8,               4},
-    {GL_RGBA16,              8},
-    {GL_DEPTH_COMPONENT16,   2},
-    {GL_DEPTH_COMPONENT24,   3},
-    {GL_DEPTH_COMPONENT32,   4},
-    {GL_R8,                  1},
-    {GL_R16,                 2},
-    {GL_RG8,                 2},
-    {GL_RG16,                4},
-    {GL_R16F,                2},
-    {GL_R32F,                4},
-    {GL_RG16F,               4},
-    {GL_RG32F,               8},
-    {GL_R8I,                 1},
-    {GL_R8UI,                1},
-    {GL_R16I,                2},
-    {GL_R16UI,               2},
-    {GL_R32I,                4},
-    {GL_R32UI,               4},
-    {GL_RG8I,                2},
-    {GL_RG8UI,               2},
-    {GL_RG16I,               4},
-    {GL_RG16UI,              4},
-    {GL_RG32I,               8},
-    {GL_RG32UI,              8},
-    {GL_COMPRESSED_RGB_S3TC_DXT1_EXT,  8},
-    {GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, 8},
-    {GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 16},
-    {GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 16},
-    {GL_RGBA32F,             16},
-    {GL_RGB32F,              12},
-    {GL_RGBA16F,             8},
-    {GL_RGB16F,              6},
-    {GL_DEPTH24_STENCIL8,    4},
-    {GL_DEPTH_COMPONENT32F,  4},
-    {GL_DEPTH32F_STENCIL8,   5},
-    {GL_STENCIL_INDEX8,      1},
-    {GL_RGBA32UI,            16},
-    {GL_RGB32UI,             12},
-    {GL_RGBA16UI,            8},
-    {GL_RGB16UI,             6},
-    {GL_RGBA8UI,             4},
-    {GL_RGB8UI,              3},
-    {GL_RGBA32I,             16},
-    {GL_RGB32I,              12},
-    {GL_RGBA16I,             8},
-    {GL_RGB16I,              6},
-    {GL_RGBA8I,              4},
-    {GL_RGB8I,               3},
-};
-static constexpr size_t kInternalFormatSizeCount = sizeof(kInternalFormatSizes) / sizeof(kInternalFormatSizes[0]);
-
-size_t get_internal_format_size(GLenum internalformat) {
-    size_t lo = 0, hi = kInternalFormatSizeCount;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        if (kInternalFormatSizes[mid].key < internalformat) lo = mid + 1;
-        else hi = mid;
-    }
-    if (lo < kInternalFormatSizeCount && kInternalFormatSizes[lo].key == internalformat) [[likely]]
-        return kInternalFormatSizes[lo].value;
-    LOG_E("Unknown internal format size for %s", glEnumToString(internalformat));
-    return 0;
-}
-
-extern std::string bufSampelerName;
-
+//
+// TBO attaches a buffer object's data store to a texture buffer target.
+// Virtual buffer IDs are resolved to real GPU buffer IDs via the buffer map.
+// On ES 3.2, glTexBuffer/glTexBufferRange are natively supported — no emulation.
 // ============================================================================
-// TBO emulation state cache — avoids redundant GL calls in glTexBuffer
-// ============================================================================
-
-// Track which TBO textures have already been initialized with default params
-std::unordered_map<GLuint, bool> g_tbo_texture_params_set; // texture -> params initialized
-// Track last allocated dimensions for TBO textures to allow glTexSubImage2D reuse
-std::unordered_map<GLuint, std::pair<GLuint, GLuint>> g_tbo_texture_dims; // texture -> {width, height}
 
 void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
     LOG()
@@ -694,121 +609,15 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
           glEnumToString(internalformat), buffer)
     if (target != GL_TEXTURE_BUFFER) return;
 
-    if (!has_buffer(buffer) || buffer == 0) {
-        GLES.glTexBuffer(target, internalformat, buffer);
-        CHECK_GL_ERROR
-        return;
+    GLuint real_buffer = buffer;
+    if (has_buffer(buffer) && buffer != 0) {
+        real_buffer = find_real_buffer(buffer);
+        if (!real_buffer) {
+            GLES.glGenBuffers(1, &real_buffer);
+            modify_buffer_direct(buffer, real_buffer);
+            CHECK_GL_ERROR
+        }
     }
-    GLuint real_buffer = find_real_buffer(buffer);
-    if (!real_buffer) {
-        GLES.glGenBuffers(1, &real_buffer);
-        modify_buffer_direct(buffer, real_buffer);
-        CHECK_GL_ERROR
-    }
-
-    if (hardware->emulate_texture_buffer) {
-        LOG_D("Emulating glTexBuffer");
-
-        GLint boundTexture = 0;
-        GLint prev_pixel_buffer_binding = 0;
-
-        GLES.glActiveTexture(GL_TEXTURE0 + 15);
-        // Use CPU-side tracking instead of glGetIntegerv GPU round-trip
-        boundTexture = g_tracked_tex2d_binding[15];
-        LOG_D("Current GL_TEXTURE_BINDING_BUFFER = %d", boundTexture);
-
-        if (!boundTexture) {
-            LOG_D("No texture bound to GL_TEXTURE_BUFFER, skipping emulation.");
-            GLES.glActiveTexture(GL_TEXTURE0 + gl_state->current_tex_unit);
-            return;
-        }
-
-        // Save pixel unpack state from CPU-side cache (avoids 5 glGetIntegerv GPU round-trips)
-        GLint prev_alignment = GLState.texture.unpackAlignment;
-        GLint prev_row_length = GLState.texture.unpackRowLength;
-        GLint prev_skip_pixels = GLState.texture.unpackSkipPixels;
-        GLint prev_skip_rows = GLState.texture.unpackSkipRows;
-        prev_pixel_buffer_binding = find_bound_buffer(GL_PIXEL_UNPACK_BUFFER_BINDING);
-
-        // Bind PBO and query buffer size from CPU-side cache (avoids glGetBufferParameteriv GPU round-trip)
-        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, real_buffer);
-        GLint bufferSize = (GLint)get_buffer_data_size(buffer);
-        LOG_D("Buffer size = %d bytes (cached)", bufferSize);
-
-        const GLuint MAX_WIDTH = 8192;
-        GLuint pixelSize = get_internal_format_size(internalformat);
-        GLuint numElements = bufferSize / pixelSize;
-        GLuint width = numElements;
-        GLuint height = 1;
-
-        if (width > MAX_WIDTH) {
-            width = MAX_WIDTH;
-            height = (numElements + MAX_WIDTH - 1) / MAX_WIDTH;
-        }
-
-        // Only set pixel store state when different from current (uses CPU-side cache)
-        // This avoids up to 4 redundant glPixelStorei calls per glTexBuffer
-        if (prev_alignment != 1) GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        if (prev_row_length != (GLint)width) GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, width);
-        if (prev_skip_pixels != 0) GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-        if (prev_skip_rows != 0) GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-
-        // Check if texture dimensions changed — use glTexSubImage2D when dimensions
-        // are the same or smaller (avoids driver-side texture reallocation)
-        auto dims_it = g_tbo_texture_dims.find(boundTexture);
-        bool dims_unchanged = (dims_it != g_tbo_texture_dims.end() &&
-                               dims_it->second.first >= width &&
-                               dims_it->second.second >= height);
-
-        GLES.glBindTexture(GL_TEXTURE_2D, boundTexture);
-        if (dims_unchanged) {
-            // Reuse existing allocation with glTexSubImage2D (cheaper than reallocation)
-            GLES.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RED_INTEGER, GL_BYTE, nullptr);
-        } else {
-            GLES.glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, GL_RED_INTEGER, GL_BYTE, nullptr);
-            g_tbo_texture_dims[boundTexture] = {width, height};
-        }
-
-        // Restore pixel store state (only when changed, using CPU-side cache)
-        if (prev_alignment != 1) GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, prev_alignment);
-        if (prev_row_length != (GLint)width) GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, prev_row_length);
-        if (prev_skip_pixels != 0) GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, prev_skip_pixels);
-        if (prev_skip_rows != 0) GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, prev_skip_rows);
-
-        auto tex = mgGetTexObjectByTarget(target);
-        tex->target = ConvertGLEnumToTextureTarget(target);
-        tex->internal_format = internalformat;
-        tex->width = width;
-        tex->height = height;
-        tex->depth = 1;
-        tex->swizzle_param[0] = GL_RED;
-        tex->swizzle_param[1] = GL_GREEN;
-        tex->swizzle_param[2] = GL_BLUE;
-        tex->swizzle_param[3] = GL_ALPHA;
-
-        // Set TBO texture parameters only on first use (avoids up to 6 glTexParameteri calls)
-        auto params_it = g_tbo_texture_params_set.find(boundTexture);
-        if (params_it == g_tbo_texture_params_set.end() || !params_it->second) {
-            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-            g_tbo_texture_params_set[boundTexture] = true;
-        }
-
-        // Restore GL state
-        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, prev_pixel_buffer_binding);
-        GLES.glActiveTexture(GL_TEXTURE0 + gl_state->current_tex_unit);
-
-        // Mark TBO uniforms as dirty so PREPARE_FOR_DRAW will sync them
-        GLState.buffer.texBuffersDirty = true;
-
-        CHECK_GL_ERROR;
-        return;
-    }
-
     GLES.glTexBuffer(target, internalformat, real_buffer);
     CHECK_GL_ERROR
 }
@@ -817,16 +626,15 @@ void glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLint
     LOG()
     LOG_D("glTexBufferRange, target = %s, internalformat = %s, buffer = %d, offset = %p, size = %zi",
           glEnumToString(target), glEnumToString(internalformat), buffer, (void*)offset, size)
-    if (!has_buffer(buffer) || buffer == 0) {
-        GLES.glTexBufferRange(target, internalformat, buffer, offset, size);
-        CHECK_GL_ERROR
-        return;
-    }
-    GLuint real_buffer = find_real_buffer(buffer);
-    if (!real_buffer) {
-        GLES.glGenBuffers(1, &real_buffer);
-        modify_buffer_direct(buffer, real_buffer);
-        CHECK_GL_ERROR
+
+    GLuint real_buffer = buffer;
+    if (has_buffer(buffer) && buffer != 0) {
+        real_buffer = find_real_buffer(buffer);
+        if (!real_buffer) {
+            GLES.glGenBuffers(1, &real_buffer);
+            modify_buffer_direct(buffer, real_buffer);
+            CHECK_GL_ERROR
+        }
     }
     GLES.glTexBufferRange(target, internalformat, real_buffer, offset, size);
     CHECK_GL_ERROR

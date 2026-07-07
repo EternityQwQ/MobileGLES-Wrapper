@@ -658,141 +658,7 @@ bool process_non_opaque_atomic_to_ssbo(std::string& source) {
 }
 
 // ============================================================================
-// Section 8: Sampler Buffer Emulation
-// ============================================================================
-
-void process_sampler_buffer(std::string& source) {
-    if (source.find("isamplerBuffer") == std::string::npos &&
-        source.find("usamplerBuffer") == std::string::npos &&
-        source.find("samplerBuffer") == std::string::npos) {
-        return;
-    }
-
-    std::set<std::string> buffer_samplers;
-
-    // Replace samplerBuffer types with sampler2D equivalents
-    // Order matters: isamplerBuffer/usamplerBuffer first, then bare samplerBuffer
-    size_t pos = 0;
-    while ((pos = source.find("isamplerBuffer", pos)) != std::string::npos) {
-        source.replace(pos, 14, "isampler2D");
-        pos += 11;
-    }
-    pos = 0;
-    while ((pos = source.find("usamplerBuffer", pos)) != std::string::npos) {
-        source.replace(pos, 14, "usampler2D");
-        pos += 11;
-    }
-    pos = 0;
-    while ((pos = source.find("samplerBuffer", pos)) != std::string::npos) {
-        if (pos > 0 && (source[pos - 1] == 'i' || source[pos - 1] == 'u')) {
-            pos += 13;
-            continue;
-        }
-        source.replace(pos, 13, "sampler2D");
-        pos += 10;
-    }
-
-    // Extract sampler variable names from declarations
-    {
-        const char* decl_prefix = "uniform ";
-        size_t p = 0;
-        while ((p = source.find(decl_prefix, p)) != std::string::npos) {
-            p += 8;
-            bool is_isampler  = (source.compare(p, 9, "isampler2") == 0);
-            bool is_usampler  = (source.compare(p, 9, "usampler2") == 0);
-            bool is_sampler   = (source.compare(p, 8, "sampler2D") == 0);
-            if (is_isampler || is_usampler || is_sampler) {
-                size_t skip = (is_isampler || is_usampler) ? 9 : 8;
-                p += skip;
-                while (p < source.size() && (source[p] == ' ' || source[p] == '\t')) p++;
-                size_t name_start = p;
-                while (p < source.size() && (std::isalnum(static_cast<unsigned char>(source[p])) || source[p] == '_')) p++;
-                std::string name = source.substr(name_start, p - name_start);
-                while (p < source.size() && source[p] != ';') p++;
-                if (p < source.size()) p++;
-                buffer_samplers.insert(name);
-            }
-        }
-    }
-
-    // Replace texelFetch with bufferCoords helper using manual parenthesis-matching parser
-    {
-        std::string result;
-        result.reserve(source.size() * 2);
-        const size_t src_len = source.size();
-        size_t scan_pos = 0;
-
-        while (scan_pos < src_len) {
-            size_t tf_pos = source.find("texelFetch(", scan_pos);
-            if (tf_pos == std::string::npos) {
-                result.append(source, scan_pos, src_len - scan_pos);
-                break;
-            }
-            result.append(source, scan_pos, tf_pos - scan_pos);
-
-            size_t paren_start = tf_pos + 11;
-            size_t arg_start = paren_start;
-            while (arg_start < src_len && std::isspace(static_cast<unsigned char>(source[arg_start]))) arg_start++;
-
-            size_t name_start = arg_start;
-            while (arg_start < src_len && (std::isalnum(static_cast<unsigned char>(source[arg_start])) || source[arg_start] == '_')) arg_start++;
-            std::string sampler_name = source.substr(name_start, arg_start - name_start);
-
-            if (buffer_samplers.find(sampler_name) == buffer_samplers.end()) {
-                result.append("texelFetch(");
-                scan_pos = paren_start;
-                continue;
-            }
-
-            while (arg_start < src_len && std::isspace(static_cast<unsigned char>(source[arg_start]))) arg_start++;
-            if (arg_start >= src_len || source[arg_start] != ',') {
-                result.append("texelFetch(");
-                scan_pos = paren_start;
-                continue;
-            }
-            arg_start++;
-            while (arg_start < src_len && std::isspace(static_cast<unsigned char>(source[arg_start]))) arg_start++;
-
-            int paren_depth = 0;
-            size_t arg2_end = arg_start;
-            while (arg2_end < src_len) {
-                char c = source[arg2_end];
-                if (c == '(') paren_depth++;
-                else if (c == ')') { if (paren_depth == 0) break; paren_depth--; }
-                else if (c == ',' && paren_depth == 0) break;
-                arg2_end++;
-            }
-            std::string index_expr = source.substr(arg_start, arg2_end - arg_start);
-            while (!index_expr.empty() && std::isspace(static_cast<unsigned char>(index_expr.back()))) index_expr.pop_back();
-
-            while (arg2_end < src_len && source[arg2_end] != ')') arg2_end++;
-            result += "texelFetch(" + sampler_name + ", bufferCoords(" + index_expr + "), 0)";
-            scan_pos = arg2_end + 1;
-        }
-        source = std::move(result);
-    }
-
-    const char* boundaryProtection = R"(
-ivec2 bufferCoords(int index) {
-    return ivec2(index % u_BufferTexWidth, index / u_BufferTexWidth);
-}
-)";
-    size_t ip = find_insertion_point(source);
-    if (ip != std::string::npos) source.insert(ip, boundaryProtection);
-
-    const char* uniformDecl = R"(
-uniform int u_BufferTexWidth;
-uniform int u_BufferTexHeight;
-)";
-    ip = find_insertion_point(source);
-    if (ip != std::string::npos) {
-        ip = source.find('\n', ip);
-        if (ip != std::string::npos) source.insert(ip + 1, uniformDecl);
-    }
-}
-
-// ============================================================================
-// Section 9: Feature Injections
+// Section 8: Feature Injections
 // ============================================================================
 
 static void inject_textureQueryLod(std::string& glsl) {
@@ -917,10 +783,7 @@ std::string preprocess_glsl(const std::string& glsl, GLenum shaderType, bool* at
     // Step 7: Macros
     inject_mg_macro_definition(ret);
 
-    // Step 8: Sampler buffer
-    if (hardware->emulate_texture_buffer) process_sampler_buffer(ret);
-
-    // Step 9: Atomic counter emulation
+    // Step 8: Atomic counter emulation
     *atomicCounterEmulated = process_non_opaque_atomic_to_ssbo(ret);
 
     return ret;

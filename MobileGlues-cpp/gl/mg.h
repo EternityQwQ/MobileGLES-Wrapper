@@ -54,9 +54,6 @@ extern void* g_loader_handle;
 #define program_map         GLState.shader.programMap
 #define program_map_remove  GLState.shader.programMapReverse
 
-// Old sampler buffer aliases
-#define tex_buffers         GLState.buffer.texBuffers
-
 // Old format conversion aliases (inline functions to avoid macro collisions)
 inline GLenum CheckTextureTarget(GLenum target) { return GLStateManager::ConvertTextureTarget(target); }
 inline GLenum CheckInternalFormat(GLenum format) { return GLStateManager::ConvertInternalFormat(format); }
