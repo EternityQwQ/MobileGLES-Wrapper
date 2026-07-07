@@ -530,12 +530,15 @@ private:
             GLState.isDrawCall = true;                                                   \
             GLint texUnit = GLState.currentTexUnit;                                      \
             GLuint currentProg = GLState.currentProgram;                                 \
+            /* Activate the TBO texture unit once before the loop (avoids redundant     \
+               glActiveTexture calls that our dirty-check already handles, but moving   \
+               it out of the loop is cleaner and avoids even the check overhead) */     \
+            glActiveTexture(GL_TEXTURE0 + texUnit);                                      \
             /* Update sampler buffer textures for TBO emulation */                      \
             for (auto& pair : GLState.buffer.texBuffers) {                               \
                 GLuint virtualBuf = pair.first;                                          \
                 auto& slot = pair.second;                                                \
                 if (slot.texture && slot.buffer) {                                       \
-                    glActiveTexture(GL_TEXTURE0 + texUnit);                              \
                     glBindTexture(GL_TEXTURE_2D, slot.texture);                          \
                     /* Set sampler uniform via the current program if known */           \
                     if (currentProg) {                                                   \

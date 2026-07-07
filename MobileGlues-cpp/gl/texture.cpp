@@ -30,6 +30,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <unordered_map>
+
+// Extern references to TBO emulation caches in buffer.cpp (invalidated on texture deletion)
+extern std::unordered_map<GLuint, bool> g_tbo_texture_params_set;
+extern std::unordered_map<GLuint, std::pair<GLuint, GLuint>> g_tbo_texture_dims;
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -572,6 +577,13 @@ static GLenum get_binding_for_target(GLenum target) {
     auto tex = __bindingSlot.GetBoundObject()
 
 // ============================================================================
+// Track the last texture bound per (unit, target) at the GLES level to avoid
+// redundant glBindTexture calls. Each glBindTexture is a driver call that
+// may trigger internal state validation, so skipping no-op rebinds reduces CPU overhead.
+// ============================================================================
+static std::unordered_map<GLenum, GLuint> g_last_gles_bound_texture[MAX_TEXTURE_IMAGE_UNITS]; // unit -> target -> texture
+
+// ============================================================================
 // glBindTexture (native, with 1D→2D mapping for legacy targets)
 // ============================================================================
 
@@ -580,17 +592,36 @@ void glBindTexture(GLenum target, GLuint texture) {
     LOG_D("glBindTexture(%s, %d)", glEnumToString(target), texture)
     INIT_CHECK_GL_ERROR
 
+    const int currentUnitIndex = GetCurrentTextureUnitIndex();
+
     if (hardware && gl_state && hardware->emulate_texture_buffer && target == GL_TEXTURE_BUFFER) {
+        // Skip GLES call if same texture is already bound to the TBO unit
+        auto it = g_last_gles_bound_texture[15].find(GL_TEXTURE_2D);
+        if (it != g_last_gles_bound_texture[15].end() && it->second == texture) {
+            g_tracked_tex2d_binding[15] = texture;
+            return;
+        }
+        g_last_gles_bound_texture[15][GL_TEXTURE_2D] = texture;
+
         GLES.glActiveTexture(GL_TEXTURE0 + 15);
         GLES.glBindTexture(GL_TEXTURE_2D, texture);
         g_tracked_tex2d_binding[15] = texture;
         GLES.glActiveTexture(GL_TEXTURE0 + gl_state->current_tex_unit);
     } else {
+        // Skip GLES call if same texture is already bound to this (unit, target)
+        auto it = g_last_gles_bound_texture[currentUnitIndex].find(target);
+        if (it != g_last_gles_bound_texture[currentUnitIndex].end() && it->second == texture) {
+            // Still need to update CPU-side tracking
+            if (target == GL_TEXTURE_2D) {
+                g_tracked_tex2d_binding[currentUnitIndex] = texture;
+            }
+            return;
+        }
+        g_last_gles_bound_texture[currentUnitIndex][target] = texture;
+
         GLES.glBindTexture(target, texture);
     }
     CHECK_GL_ERROR_NO_INIT
-
-    const int currentUnitIndex = GetCurrentTextureUnitIndex();
 
     // Track GL_TEXTURE_2D binding per-unit to avoid glGetIntegerv GPU queries
     if (target == GL_TEXTURE_2D) {
@@ -628,6 +659,23 @@ void glDeleteTextures(GLsizei n, const GLuint* textures) {
 
     for (GLsizei i = 0; i < n; ++i) {
         MarkTextureObjectForDeletion(textures[i]);
+        // Invalidate texture binding caches: clear any cached state for this texture
+        for (int unit = 0; unit < MAX_TEXTURE_IMAGE_UNITS; ++unit) {
+            for (auto it = g_last_gles_bound_texture[unit].begin();
+                 it != g_last_gles_bound_texture[unit].end();) {
+                if (it->second == textures[i]) {
+                    it = g_last_gles_bound_texture[unit].erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            if (g_tracked_tex2d_binding[unit] == textures[i]) {
+                g_tracked_tex2d_binding[unit] = 0;
+            }
+        }
+        // Invalidate TBO emulation caches
+        g_tbo_texture_params_set.erase(textures[i]);
+        g_tbo_texture_dims.erase(textures[i]);
     }
 }
 
@@ -639,9 +687,13 @@ void glActiveTexture(GLenum texture) {
         return;
     }
 
-    set_gl_state_current_tex_unit(texture - GL_TEXTURE0);
+    int unit = texture - GL_TEXTURE0;
+    // Skip GLES call if this texture unit is already active (avoids driver overhead)
+    if (unit == GetCurrentTextureUnitIndex()) return;
+
+    set_gl_state_current_tex_unit(unit);
     GLES.glActiveTexture(texture);
-    ActivateTextureUnit(texture - GL_TEXTURE0);
+    ActivateTextureUnit(unit);
     CHECK_GL_ERROR
 }
 
@@ -1435,23 +1487,23 @@ void glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, co
 
 void glPixelStorei(GLenum pname, GLint param) {
     LOG_D("glPixelStorei, pname = %s, param = %d", glEnumToString(pname), param)
-    GLES.glPixelStorei(pname, param);
-    // Keep CPU-side cache in sync to avoid glGetIntegerv GPU round-trips
+    // Skip GLES call if the parameter hasn't changed (avoids driver overhead)
     switch (pname) {
-        case GL_UNPACK_ALIGNMENT:  GLState.texture.unpackAlignment = param;  break;
-        case GL_UNPACK_ROW_LENGTH: GLState.texture.unpackRowLength = param;  break;
-        case GL_UNPACK_IMAGE_HEIGHT: GLState.texture.unpackImageHeight = param; break;
-        case GL_UNPACK_SKIP_PIXELS: GLState.texture.unpackSkipPixels = param; break;
-        case GL_UNPACK_SKIP_ROWS:  GLState.texture.unpackSkipRows = param;  break;
-        case GL_UNPACK_SKIP_IMAGES: GLState.texture.unpackSkipImages = param; break;
-        case GL_PACK_ALIGNMENT:    GLState.texture.packAlignment = param;    break;
-        case GL_PACK_ROW_LENGTH:   GLState.texture.packRowLength = param;    break;
-        case GL_PACK_IMAGE_HEIGHT: GLState.texture.packImageHeight = param;  break;
-        case GL_PACK_SKIP_PIXELS:  GLState.texture.packSkipPixels = param;   break;
-        case GL_PACK_SKIP_ROWS:    GLState.texture.packSkipRows = param;     break;
-        case GL_PACK_SKIP_IMAGES:  GLState.texture.packSkipImages = param;   break;
+        case GL_UNPACK_ALIGNMENT:  if (GLState.texture.unpackAlignment == param) return; GLState.texture.unpackAlignment = param; break;
+        case GL_UNPACK_ROW_LENGTH: if (GLState.texture.unpackRowLength == param) return; GLState.texture.unpackRowLength = param; break;
+        case GL_UNPACK_IMAGE_HEIGHT: if (GLState.texture.unpackImageHeight == param) return; GLState.texture.unpackImageHeight = param; break;
+        case GL_UNPACK_SKIP_PIXELS: if (GLState.texture.unpackSkipPixels == param) return; GLState.texture.unpackSkipPixels = param; break;
+        case GL_UNPACK_SKIP_ROWS:  if (GLState.texture.unpackSkipRows == param) return; GLState.texture.unpackSkipRows = param; break;
+        case GL_UNPACK_SKIP_IMAGES: if (GLState.texture.unpackSkipImages == param) return; GLState.texture.unpackSkipImages = param; break;
+        case GL_PACK_ALIGNMENT:    if (GLState.texture.packAlignment == param) return; GLState.texture.packAlignment = param; break;
+        case GL_PACK_ROW_LENGTH:   if (GLState.texture.packRowLength == param) return; GLState.texture.packRowLength = param; break;
+        case GL_PACK_IMAGE_HEIGHT: if (GLState.texture.packImageHeight == param) return; GLState.texture.packImageHeight = param; break;
+        case GL_PACK_SKIP_PIXELS:  if (GLState.texture.packSkipPixels == param) return; GLState.texture.packSkipPixels = param; break;
+        case GL_PACK_SKIP_ROWS:    if (GLState.texture.packSkipRows == param) return; GLState.texture.packSkipRows = param; break;
+        case GL_PACK_SKIP_IMAGES:  if (GLState.texture.packSkipImages == param) return; GLState.texture.packSkipImages = param; break;
         default: break;
     }
+    GLES.glPixelStorei(pname, param);
     CHECK_GL_ERROR
 }
 

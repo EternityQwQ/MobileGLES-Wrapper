@@ -12,6 +12,7 @@
 #include "buffer.h"
 #include "ankerl/unordered_dense.h"
 #include "texture.h"
+#include <unordered_map>
 #include <utility>
 
 // Extern from drawing.cpp: CPU-side tracked GL_TEXTURE_2D binding per unit
@@ -317,6 +318,23 @@ void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     for (int i = 0; i < n; ++i) {
         auto [real_buff, exists] = find_real_buffer_with_exists(buffers[i]);
         if (exists) {
+            // Invalidate binding caches: if any target was tracking this real buffer,
+            // reset it to force the next glBindBuffer to actually call the driver.
+            for (int j = 0; j < BINDING_COUNT; ++j) {
+                if (g_last_gles_bound_buffer[j] == real_buff) {
+                    g_last_gles_bound_buffer[j] = 0;
+                }
+            }
+            // Invalidate range/base binding caches
+            for (auto& [target, idx_map] : g_last_bound_range) {
+                for (auto& [idx, cached] : idx_map) {
+                    if (cached == real_buff) cached = 0;
+                }
+            }
+            // Invalidate vertex buffer binding cache
+            for (auto& [idx, cached] : g_last_bound_vertex_buffer) {
+                if (cached == real_buff) cached = 0;
+            }
             GLES.glDeleteBuffers(1, &real_buff);
             CHECK_GL_ERROR
         }
@@ -334,6 +352,11 @@ GLboolean glIsBuffer(GLuint buffer) {
 // Buffer Binding (ES 3.2 native, with buffer map)
 // ============================================================================
 
+// Track the last buffer bound per target at the GLES level to avoid redundant
+// glBindBuffer calls. Each glBindBuffer is a driver call that may trigger
+// internal state validation, so skipping no-op rebinds reduces CPU overhead.
+static GLuint g_last_gles_bound_buffer[BINDING_COUNT] = {0};
+
 void glBindBuffer(GLenum target, GLuint buffer) {
     LOG()
     LOG_D("glBindBuffer, target = %s, buffer = %d", glEnumToString(target), buffer)
@@ -344,6 +367,11 @@ void glBindBuffer(GLenum target, GLuint buffer) {
     }
 
     if (buffer == 0) [[unlikely]] {
+        int idx = binding_target_to_index(target);
+        if (idx >= 0) {
+            if (g_last_gles_bound_buffer[idx] == 0) return; // already 0
+            g_last_gles_bound_buffer[idx] = 0;
+        }
         GLES.glBindBuffer(target, buffer);
         CHECK_GL_ERROR
         return;
@@ -358,6 +386,12 @@ void glBindBuffer(GLenum target, GLuint buffer) {
         GLES.glGenBuffers(1, &real_buffer);
         modify_buffer_direct(buffer, real_buffer);
         CHECK_GL_ERROR
+    }
+    // Skip GLES call if the same real buffer is already bound to this target
+    int idx = binding_target_to_index(target);
+    if (idx >= 0) {
+        if (g_last_gles_bound_buffer[idx] == real_buffer) return;
+        g_last_gles_bound_buffer[idx] = real_buffer;
     }
     LOG_D("glBindBuffer: %d -> %d", buffer, real_buffer)
     GLES.glBindBuffer(target, real_buffer);
@@ -457,12 +491,24 @@ void bindAllAtomicCounterAsSSBO() {
     }
 }
 
+// Track last bind per (target, index) to skip redundant glBindBufferRange calls
+static std::unordered_map<GLenum, std::unordered_map<GLuint, GLuint>> g_last_bound_range; // target -> index -> real_buffer
+
 void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
     LOG()
     LOG_D("glBindBufferRange, target = %s, index = %d, buffer = %d, offset = %p, size = %zi", glEnumToString(target),
           index, buffer, (void*)offset, size)
 
     if (buffer == 0) {
+        // Skip if already unbound at this index
+        auto it_target = g_last_bound_range.find(target);
+        if (it_target != g_last_bound_range.end()) {
+            auto it_idx = it_target->second.find(index);
+            if (it_idx != it_target->second.end() && it_idx->second == 0) return;
+            it_target->second[index] = 0;
+        } else {
+            g_last_bound_range[target][index] = 0;
+        }
         GLES.glBindBufferRange(target, index, buffer, offset, size);
         CHECK_GL_ERROR
         return;
@@ -478,6 +524,14 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offs
         modify_buffer_direct(buffer, real_buffer);
         CHECK_GL_ERROR
     }
+    // Skip GLES call if same real buffer already bound at this (target, index)
+    auto it_target = g_last_bound_range.find(target);
+    if (it_target != g_last_bound_range.end()) {
+        auto it_idx = it_target->second.find(index);
+        if (it_idx != it_target->second.end() && it_idx->second == real_buffer) return;
+    }
+    g_last_bound_range[target][index] = real_buffer;
+
     GLES.glBindBufferRange(target, index, real_buffer, offset, size);
     if (target == GL_ATOMIC_COUNTER_BUFFER) {
         if (g_buffer_map_atomic_buffer_info.empty()) {
@@ -493,6 +547,14 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     LOG_D("glBindBufferBase, target = %s, index = %d, buffer = %d", glEnumToString(target), index, buffer)
 
     if (buffer == 0) {
+        auto it_target = g_last_bound_range.find(target);
+        if (it_target != g_last_bound_range.end()) {
+            auto it_idx = it_target->second.find(index);
+            if (it_idx != it_target->second.end() && it_idx->second == 0) return;
+            it_target->second[index] = 0;
+        } else {
+            g_last_bound_range[target][index] = 0;
+        }
         GLES.glBindBufferBase(target, index, buffer);
         CHECK_GL_ERROR
         return;
@@ -508,6 +570,14 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
         modify_buffer_direct(buffer, real_buffer);
         CHECK_GL_ERROR
     }
+    // Skip GLES call if same real buffer already bound at this (target, index)
+    auto it_target = g_last_bound_range.find(target);
+    if (it_target != g_last_bound_range.end()) {
+        auto it_idx = it_target->second.find(index);
+        if (it_idx != it_target->second.end() && it_idx->second == real_buffer) return;
+    }
+    g_last_bound_range[target][index] = real_buffer;
+
     GLES.glBindBufferBase(target, index, real_buffer);
     if (target == GL_SHADER_STORAGE_BUFFER) {
         if (g_buffer_map_ssbo_id.empty()) {
@@ -522,11 +592,17 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
 // Vertex Buffer Binding (ES 3.2 native, with buffer map)
 // ============================================================================
 
+// Track last vertex buffer binding per index to skip redundant GLES calls
+static std::unordered_map<GLuint, GLuint> g_last_bound_vertex_buffer; // bindingindex -> real_buffer
+
 void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
     LOG()
     LOG_D("glBindVertexBuffer, bindingindex = %d, buffer = %d, offset = %p, stride = %i", bindingindex, buffer, offset,
           stride)
     if (buffer == 0) [[unlikely]] {
+        auto it = g_last_bound_vertex_buffer.find(bindingindex);
+        if (it != g_last_bound_vertex_buffer.end() && it->second == 0) return;
+        g_last_bound_vertex_buffer[bindingindex] = 0;
         GLES.glBindVertexBuffer(bindingindex, buffer, offset, stride);
         CHECK_GL_ERROR
         return;
@@ -542,6 +618,10 @@ void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLs
         modify_buffer_direct(buffer, real_buffer);
         CHECK_GL_ERROR
     }
+    // Skip GLES call if same real buffer already bound at this index
+    auto it = g_last_bound_vertex_buffer.find(bindingindex);
+    if (it != g_last_bound_vertex_buffer.end() && it->second == real_buffer) return;
+    g_last_bound_vertex_buffer[bindingindex] = real_buffer;
     GLES.glBindVertexBuffer(bindingindex, real_buffer, offset, stride);
     CHECK_GL_ERROR
 }
@@ -678,6 +758,15 @@ size_t get_internal_format_size(GLenum internalformat) {
 
 extern std::string bufSampelerName;
 
+// ============================================================================
+// TBO emulation state cache — avoids redundant GL calls in glTexBuffer
+// ============================================================================
+
+// Track which TBO textures have already been initialized with default params
+std::unordered_map<GLuint, bool> g_tbo_texture_params_set; // texture -> params initialized
+// Track last allocated dimensions for TBO textures to allow glTexSubImage2D reuse
+std::unordered_map<GLuint, std::pair<GLuint, GLuint>> g_tbo_texture_dims; // texture -> {width, height}
+
 void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
     LOG()
     LOG_D("glTexBuffer, target = %s, internalformat = %s, buffer = %d", glEnumToString(target),
@@ -736,22 +825,34 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
             height = (numElements + MAX_WIDTH - 1) / MAX_WIDTH;
         }
 
-        // Use GL_UNPACK_ROW_LENGTH to describe PBO layout, enabling single-call upload
-        // without row-by-row glTexSubImage2D loop
-        GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, width);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        // Only set pixel store state when different from current (uses CPU-side cache)
+        // This avoids up to 4 redundant glPixelStorei calls per glTexBuffer
+        if (prev_alignment != 1) GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        if (prev_row_length != (GLint)width) GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, width);
+        if (prev_skip_pixels != 0) GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        if (prev_skip_rows != 0) GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
 
-        // Single upload: allocate and upload in one call via PBO
+        // Check if texture dimensions changed — use glTexSubImage2D when dimensions
+        // are the same or smaller (avoids driver-side texture reallocation)
+        auto dims_it = g_tbo_texture_dims.find(boundTexture);
+        bool dims_unchanged = (dims_it != g_tbo_texture_dims.end() &&
+                               dims_it->second.first >= width &&
+                               dims_it->second.second >= height);
+
         GLES.glBindTexture(GL_TEXTURE_2D, boundTexture);
-        GLES.glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, GL_RED_INTEGER, GL_BYTE, nullptr);
+        if (dims_unchanged) {
+            // Reuse existing allocation with glTexSubImage2D (cheaper than reallocation)
+            GLES.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RED_INTEGER, GL_BYTE, nullptr);
+        } else {
+            GLES.glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, GL_RED_INTEGER, GL_BYTE, nullptr);
+            g_tbo_texture_dims[boundTexture] = {width, height};
+        }
 
-        // Restore pixel store state
-        GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, prev_alignment);
-        GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, prev_row_length);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, prev_skip_pixels);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, prev_skip_rows);
+        // Restore pixel store state (only when changed, using CPU-side cache)
+        if (prev_alignment != 1) GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, prev_alignment);
+        if (prev_row_length != (GLint)width) GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, prev_row_length);
+        if (prev_skip_pixels != 0) GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, prev_skip_pixels);
+        if (prev_skip_rows != 0) GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, prev_skip_rows);
 
         auto tex = mgGetTexObjectByTarget(target);
         tex->target = ConvertGLEnumToTextureTarget(target);
@@ -764,12 +865,17 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
         tex->swizzle_param[2] = GL_BLUE;
         tex->swizzle_param[3] = GL_ALPHA;
 
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        // Set TBO texture parameters only on first use (avoids up to 6 glTexParameteri calls)
+        auto params_it = g_tbo_texture_params_set.find(boundTexture);
+        if (params_it == g_tbo_texture_params_set.end() || !params_it->second) {
+            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+            GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            g_tbo_texture_params_set[boundTexture] = true;
+        }
 
         // Restore GL state
         GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, prev_pixel_buffer_binding);
@@ -828,6 +934,10 @@ void glDeleteVertexArrays(GLsizei n, const GLuint* arrays) {
                 CHECK_GL_ERROR
             }
         }
+        // Invalidate VAO binding cache: if the deleted VAO was bound, reset to 0
+        if (arrays[i] == bound_array) {
+            bound_array = 0;
+        }
         remove_array(arrays[i]);
     }
 }
@@ -841,6 +951,10 @@ GLboolean glIsVertexArray(GLuint array) {
 void glBindVertexArray(GLuint array) {
     LOG()
     LOG_D("glBindVertexArray(%d)", array)
+
+    // Skip if already bound (avoids driver overhead)
+    if (bound_array == array) return;
+
     bound_array = array;
 
     // update bound ibo

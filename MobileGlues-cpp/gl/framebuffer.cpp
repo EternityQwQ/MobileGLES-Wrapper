@@ -69,9 +69,19 @@ extern "C" GLAPI GLAPIENTRY void glDeleteFramebuffers(GLsizei n, const GLuint *f
 
 extern "C" GLAPI GLAPIENTRY void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     LOG()
+    auto &fb = GLState.framebuffer;
+
+    // Skip GLES call if the same FBO is already bound to this target (avoids driver overhead)
+    if (target == GL_DRAW_FRAMEBUFFER) {
+        if (fb.drawFBO == framebuffer) return;
+    } else if (target == GL_READ_FRAMEBUFFER) {
+        if (fb.readFBO == framebuffer) return;
+    } else if (target == GL_FRAMEBUFFER) {
+        if (fb.drawFBO == framebuffer && fb.readFBO == framebuffer) return;
+    }
+
     GLES.glBindFramebuffer(target, framebuffer);
 
-    auto &fb = GLState.framebuffer;
     if (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER) {
         fb.drawFBO = framebuffer;
         GLState.currentDrawFBO = framebuffer;

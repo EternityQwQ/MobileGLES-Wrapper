@@ -152,6 +152,8 @@ void glValidateProgram(GLuint program) {
 
 void glUseProgram(GLuint program) {
     LOG()
+    // Skip GLES call if the same program is already in use (avoids driver overhead)
+    if (GLState.shader.currentProgram == program && GLState.currentProgram == program) return;
     GLState.shader.currentProgram = program;
     GLState.currentProgram = program;
     GLES.glUseProgram(program);

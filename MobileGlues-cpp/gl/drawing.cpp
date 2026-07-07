@@ -145,10 +145,13 @@ extern "C" GLAPI GLAPIENTRY void glDrawBuffers(GLsizei n, const GLenum *bufs) {
 // ============================================================================
 
 extern "C" GLAPI GLAPIENTRY void glBindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format) {
-    GLES.glBindImageTexture(unit, texture, level, layered, layer, access, format);
-
+    // Skip GLES call if the image unit state hasn't changed (avoids driver overhead)
     if (unit < MAX_IMAGE_UNITS) {
         auto &img = GLState.image.imageUnits[unit];
+        if (img.texture == texture && img.level == level && img.layered == layered &&
+            img.layer == layer && img.access == access && img.format == format) {
+            return;
+        }
         img.texture = texture;
         img.level = level;
         img.layered = layered;
@@ -156,6 +159,7 @@ extern "C" GLAPI GLAPIENTRY void glBindImageTexture(GLuint unit, GLuint texture,
         img.access = access;
         img.format = format;
     }
+    GLES.glBindImageTexture(unit, texture, level, layered, layer, access, format);
 }
 
 // ============================================================================
