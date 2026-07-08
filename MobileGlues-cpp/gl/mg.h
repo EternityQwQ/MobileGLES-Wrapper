@@ -146,6 +146,24 @@ inline GLuint getRealShader(GLuint virtualId) {
 }
 
 // ============================================================================
+// New: RenderState version accessor (for backend dirty-tracking)
+// ============================================================================
+
+inline uint32_t GetRenderStateVersion() { return GLState.renderState.GetVersion(); }
+inline const RenderStateParameters& GetRenderStateParameters() { return GLState.renderState.GetAllParameters(); }
+
+// ============================================================================
+// New: ErrorState convenience accessors
+// ============================================================================
+
+inline void RecordGLError(ErrorCode code, const char* message) {
+    GLState.errorState.RecordError(code, std::make_unique<GenericErrorInfo>(message));
+}
+
+inline bool HasGLError() { return GLState.errorState.HasGLError(); }
+inline void ClearGLErrors() { GLState.errorState.Clear(); }
+
+// ============================================================================
 // State initialization (called from mg.cpp)
 // ============================================================================
 

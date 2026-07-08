@@ -1,6 +1,11 @@
 // MobileGlues - gl/state.cpp
 // Unified OpenGL State Manager implementation
 //
+// Design (inspired by MobileGL-DirectGLES):
+//   - RenderState: version-tracked dirty flag for efficient backend sync
+//   - ErrorState: structured error recording (GL + non-GL errors)
+//   - Nested subsystem state structs for backward compatibility
+//
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -9,6 +14,603 @@
 
 #include "state.h"
 #include "../gles/loader.h"
+#include <cstring>
+
+// ============================================================================
+// ErrorState Implementation
+// ============================================================================
+
+void ErrorState::RecordError(ErrorCode code, std::unique_ptr<ErrorInfo> info) {
+    if (code == ErrorCode::NoError) {
+        MG_LOG_ERROR("Recording Non-OpenGL error: %s", info->ToString().c_str());
+        m_nonGLErrors.push_back(std::make_unique<Error>(code, std::move(info)));
+    } else {
+        MG_LOG_ERROR("Recording OpenGL error (%u): %s",
+                     static_cast<uint32_t>(code), info->ToString().c_str());
+        m_errors.push_back(std::make_unique<Error>(code, std::move(info)));
+    }
+}
+
+bool ErrorState::HasGLError() const {
+    return !m_errors.empty();
+}
+
+const Error* ErrorState::PeekGLError() const {
+    if (m_errors.empty()) return nullptr;
+    return m_errors.front().get();
+}
+
+std::unique_ptr<Error> ErrorState::PopGLError() {
+    if (m_errors.empty()) return nullptr;
+    auto error = std::move(m_errors.front());
+    m_errors.erase(m_errors.begin());
+    return error;
+}
+
+bool ErrorState::HasNonGLError() const {
+    return !m_nonGLErrors.empty();
+}
+
+const Error* ErrorState::PeekNonGLError() const {
+    if (m_nonGLErrors.empty()) return nullptr;
+    return m_nonGLErrors.front().get();
+}
+
+std::unique_ptr<Error> ErrorState::PopNonGLError() {
+    if (m_nonGLErrors.empty()) return nullptr;
+    auto error = std::move(m_nonGLErrors.front());
+    m_nonGLErrors.erase(m_nonGLErrors.begin());
+    return error;
+}
+
+void ErrorState::Clear() {
+    m_errors.clear();
+    m_nonGLErrors.clear();
+}
+
+// ============================================================================
+// RenderState Implementation (version-tracked dirty flag)
+// ============================================================================
+
+// --- Rasterization ---
+
+void RenderState::SetViewport(int32_t x, int32_t y, int32_t width, int32_t height) {
+    if (m_parameters.Viewport[0] == x && m_parameters.Viewport[1] == y &&
+        m_parameters.Viewport[2] == width && m_parameters.Viewport[3] == height) return;
+
+    m_parameters.Viewport[0] = x;
+    m_parameters.Viewport[1] = y;
+    m_parameters.Viewport[2] = width;
+    m_parameters.Viewport[3] = height;
+    ++m_version;
+}
+
+void RenderState::GetViewport(int32_t* out) const {
+    out[0] = m_parameters.Viewport[0];
+    out[1] = m_parameters.Viewport[1];
+    out[2] = m_parameters.Viewport[2];
+    out[3] = m_parameters.Viewport[3];
+}
+
+void RenderState::SetLineWidth(float width) {
+    if (m_parameters.LineWidth == width) return;
+    m_parameters.LineWidth = width;
+    ++m_version;
+}
+
+float RenderState::GetLineWidth() const {
+    return m_parameters.LineWidth;
+}
+
+void RenderState::SetPointSize(float size) {
+    if (m_parameters.PointSize == size) return;
+    m_parameters.PointSize = size;
+    ++m_version;
+}
+
+float RenderState::GetPointSize() const {
+    return m_parameters.PointSize;
+}
+
+void RenderState::SetPolygonOffset(float factor, float units) {
+    if (m_parameters.PolygonOffsetFactor == factor &&
+        m_parameters.PolygonOffsetUnits == units) return;
+
+    m_parameters.PolygonOffsetFactor = factor;
+    m_parameters.PolygonOffsetUnits = units;
+    ++m_version;
+}
+
+float RenderState::GetPolygonOffsetFactor() const {
+    return m_parameters.PolygonOffsetFactor;
+}
+
+float RenderState::GetPolygonOffsetUnits() const {
+    return m_parameters.PolygonOffsetUnits;
+}
+
+// --- Capabilities ---
+
+void RenderState::SetCapability(Capability cap, bool enabled) {
+#define SET_CAP(capName, field) \
+    case Capability::capName: \
+        if (m_parameters.field == enabled) break; \
+        m_parameters.field = enabled; \
+        ++m_version; \
+        break;
+
+    switch (cap) {
+        SET_CAP(ColorLogicOp, ColorLogicOpEnabled)
+        SET_CAP(DebugOutput, DebugOutputEnabled)
+        SET_CAP(DebugOutputSynchronous, DebugOutputSynchronousEnabled)
+        SET_CAP(DepthTest, DepthTestEnabled)
+        SET_CAP(CullFace, CullFaceEnabled)
+        SET_CAP(Dither, DitherEnabled)
+        SET_CAP(LineSmooth, LineSmoothEnabled)
+        SET_CAP(Multisample, MultisampleEnabled)
+        SET_CAP(PolygonOffsetFill, PolygonOffsetFillEnabled)
+        SET_CAP(PolygonOffsetLine, PolygonOffsetLineEnabled)
+        SET_CAP(PolygonOffsetPoint, PolygonOffsetPointEnabled)
+        SET_CAP(PolygonSmooth, PolygonSmoothEnabled)
+        SET_CAP(PrimitiveRestart, PrimitiveRestartEnabled)
+        SET_CAP(PrimitiveRestartFixedIndex, PrimitiveRestartFixedIndexEnabled)
+        SET_CAP(RasterizerDiscard, RasterizerDiscardEnabled)
+        SET_CAP(SampleAlphaToCoverage, SampleAlphaToCoverageEnabled)
+        SET_CAP(SampleAlphaToOne, SampleAlphaToOneEnabled)
+        SET_CAP(SampleCoverage, SampleCoverageEnabled)
+        SET_CAP(SampleMask, SampleMaskEnabled)
+        SET_CAP(ScissorTest, ScissorTestEnabled)
+        SET_CAP(StencilTest, StencilTestEnabled)
+        SET_CAP(ProgramPointSize, ProgramPointSizeEnabled)
+    case Capability::Blend: {
+        bool stateChanged = false;
+        for (auto& blendState : m_parameters.BlendStates) {
+            if (blendState.Enabled == enabled) continue;
+            blendState.Enabled = enabled;
+            stateChanged = true;
+        }
+        if (stateChanged) ++m_version;
+        break;
+    }
+    default:
+        break;
+    }
+#undef SET_CAP
+}
+
+bool RenderState::IsCapabilityEnabled(Capability cap) const {
+#define RETURN_CAP(capName, field) \
+    case Capability::capName: return m_parameters.field;
+    switch (cap) {
+        RETURN_CAP(ColorLogicOp, ColorLogicOpEnabled)
+        RETURN_CAP(DebugOutput, DebugOutputEnabled)
+        RETURN_CAP(DebugOutputSynchronous, DebugOutputSynchronousEnabled)
+        RETURN_CAP(DepthTest, DepthTestEnabled)
+        RETURN_CAP(CullFace, CullFaceEnabled)
+        RETURN_CAP(Dither, DitherEnabled)
+        RETURN_CAP(LineSmooth, LineSmoothEnabled)
+        RETURN_CAP(Multisample, MultisampleEnabled)
+        RETURN_CAP(PolygonOffsetFill, PolygonOffsetFillEnabled)
+        RETURN_CAP(PolygonOffsetLine, PolygonOffsetLineEnabled)
+        RETURN_CAP(PolygonOffsetPoint, PolygonOffsetPointEnabled)
+        RETURN_CAP(PolygonSmooth, PolygonSmoothEnabled)
+        RETURN_CAP(PrimitiveRestart, PrimitiveRestartEnabled)
+        RETURN_CAP(PrimitiveRestartFixedIndex, PrimitiveRestartFixedIndexEnabled)
+        RETURN_CAP(RasterizerDiscard, RasterizerDiscardEnabled)
+        RETURN_CAP(SampleAlphaToCoverage, SampleAlphaToCoverageEnabled)
+        RETURN_CAP(SampleAlphaToOne, SampleAlphaToOneEnabled)
+        RETURN_CAP(SampleCoverage, SampleCoverageEnabled)
+        RETURN_CAP(SampleMask, SampleMaskEnabled)
+        RETURN_CAP(ScissorTest, ScissorTestEnabled)
+        RETURN_CAP(StencilTest, StencilTestEnabled)
+        RETURN_CAP(ProgramPointSize, ProgramPointSizeEnabled)
+    case Capability::Blend:
+        return m_parameters.BlendStates[0].Enabled;
+    default:
+        return false;
+    }
+#undef RETURN_CAP
+}
+
+void RenderState::SetCapabilityIndexed(Capability cap, uint32_t index, bool enabled) {
+    if (cap != Capability::Blend) return;
+    if (index >= static_cast<uint32_t>(MAX_DRAW_BUFFERS)) return;
+    if (m_parameters.BlendStates[index].Enabled == enabled) return;
+    m_parameters.BlendStates[index].Enabled = enabled;
+    ++m_version;
+}
+
+bool RenderState::IsCapabilityEnabledIndexed(Capability cap, uint32_t index) const {
+    if (cap != Capability::Blend) return false;
+    if (index >= static_cast<uint32_t>(MAX_DRAW_BUFFERS)) return false;
+    return m_parameters.BlendStates[index].Enabled;
+}
+
+// --- Blending ---
+
+void RenderState::SetBlendFunc(BlendFactor srcRGB, BlendFactor dstRGB,
+                               BlendFactor srcAlpha, BlendFactor dstAlpha) {
+    bool stateChanged = false;
+    for (auto& blendState : m_parameters.BlendStates) {
+        if (blendState.SrcFactorRGB == srcRGB && blendState.DstFactorRGB == dstRGB &&
+            blendState.SrcFactorAlpha == srcAlpha && blendState.DstFactorAlpha == dstAlpha) {
+            continue;
+        }
+        blendState.SrcFactorRGB = srcRGB;
+        blendState.DstFactorRGB = dstRGB;
+        blendState.SrcFactorAlpha = srcAlpha;
+        blendState.DstFactorAlpha = dstAlpha;
+        stateChanged = true;
+    }
+    if (!stateChanged) return;
+    ++m_version;
+}
+
+void RenderState::GetBlendFunc(BlendFactor& srcRGB, BlendFactor& dstRGB,
+                               BlendFactor& srcAlpha, BlendFactor& dstAlpha) const {
+    srcRGB = m_parameters.BlendStates[0].SrcFactorRGB;
+    dstRGB = m_parameters.BlendStates[0].DstFactorRGB;
+    srcAlpha = m_parameters.BlendStates[0].SrcFactorAlpha;
+    dstAlpha = m_parameters.BlendStates[0].DstFactorAlpha;
+}
+
+void RenderState::SetBlendFuncIndexed(uint32_t index, BlendFactor srcRGB, BlendFactor dstRGB,
+                                      BlendFactor srcAlpha, BlendFactor dstAlpha) {
+    if (index >= static_cast<uint32_t>(MAX_DRAW_BUFFERS)) return;
+    PerBufferBlendState& blendState = m_parameters.BlendStates[index];
+    if (blendState.SrcFactorRGB == srcRGB && blendState.DstFactorRGB == dstRGB &&
+        blendState.SrcFactorAlpha == srcAlpha && blendState.DstFactorAlpha == dstAlpha) {
+        return;
+    }
+    blendState.SrcFactorRGB = srcRGB;
+    blendState.DstFactorRGB = dstRGB;
+    blendState.SrcFactorAlpha = srcAlpha;
+    blendState.DstFactorAlpha = dstAlpha;
+    ++m_version;
+}
+
+void RenderState::GetBlendFuncIndexed(uint32_t index, BlendFactor& srcRGB, BlendFactor& dstRGB,
+                                      BlendFactor& srcAlpha, BlendFactor& dstAlpha) const {
+    if (index >= static_cast<uint32_t>(MAX_DRAW_BUFFERS)) return;
+    srcRGB = m_parameters.BlendStates[index].SrcFactorRGB;
+    dstRGB = m_parameters.BlendStates[index].DstFactorRGB;
+    srcAlpha = m_parameters.BlendStates[index].SrcFactorAlpha;
+    dstAlpha = m_parameters.BlendStates[index].DstFactorAlpha;
+}
+
+void RenderState::SetBlendEquation(BlendEquation color, BlendEquation alpha) {
+    bool stateChanged = false;
+    for (auto& blendState : m_parameters.BlendStates) {
+        if (blendState.ColorEquation == color && blendState.AlphaEquation == alpha) continue;
+        blendState.ColorEquation = color;
+        blendState.AlphaEquation = alpha;
+        stateChanged = true;
+    }
+    if (!stateChanged) return;
+    ++m_version;
+}
+
+void RenderState::GetBlendEquation(BlendEquation& color, BlendEquation& alpha) const {
+    color = m_parameters.BlendStates[0].ColorEquation;
+    alpha = m_parameters.BlendStates[0].AlphaEquation;
+}
+
+void RenderState::SetBlendEquationIndexed(uint32_t index, BlendEquation color, BlendEquation alpha) {
+    if (index >= static_cast<uint32_t>(MAX_DRAW_BUFFERS)) return;
+    PerBufferBlendState& blendState = m_parameters.BlendStates[index];
+    if (blendState.ColorEquation == color && blendState.AlphaEquation == alpha) return;
+    blendState.ColorEquation = color;
+    blendState.AlphaEquation = alpha;
+    ++m_version;
+}
+
+void RenderState::GetBlendEquationIndexed(uint32_t index, BlendEquation& color, BlendEquation& alpha) const {
+    if (index >= static_cast<uint32_t>(MAX_DRAW_BUFFERS)) return;
+    color = m_parameters.BlendStates[index].ColorEquation;
+    alpha = m_parameters.BlendStates[index].AlphaEquation;
+}
+
+void RenderState::SetLogicOp(LogicOperation logicOp) {
+    if (m_parameters.LogicOp == logicOp) return;
+    m_parameters.LogicOp = logicOp;
+    ++m_version;
+}
+
+LogicOperation RenderState::GetLogicOp() const {
+    return m_parameters.LogicOp;
+}
+
+// --- Depth ---
+
+void RenderState::SetDepthFunc(DepthTestFunc func) {
+    if (m_parameters.DepthFunc == func) return;
+    m_parameters.DepthFunc = func;
+    ++m_version;
+}
+
+DepthTestFunc RenderState::GetDepthFunc() const {
+    return m_parameters.DepthFunc;
+}
+
+void RenderState::SetDepthMask(bool flag) {
+    if (m_parameters.DepthMask == flag) return;
+    m_parameters.DepthMask = flag;
+    ++m_version;
+}
+
+bool RenderState::GetDepthMask() const {
+    return m_parameters.DepthMask;
+}
+
+void RenderState::SetStencilFunc(uint32_t faceIndex, DepthTestFunc func, int32_t ref, uint32_t mask) {
+    if (faceIndex >= 2) return;
+    StencilFaceState& state = m_parameters.StencilStates[faceIndex];
+    if (state.Func == func && state.Ref == ref && state.ValueMask == mask) return;
+    state.Func = func;
+    state.Ref = ref;
+    state.ValueMask = mask;
+    ++m_version;
+}
+
+void RenderState::SetStencilMask(uint32_t faceIndex, uint32_t mask) {
+    if (faceIndex >= 2) return;
+    StencilFaceState& state = m_parameters.StencilStates[faceIndex];
+    if (state.WriteMask == mask) return;
+    state.WriteMask = mask;
+    ++m_version;
+}
+
+void RenderState::SetStencilOp(uint32_t faceIndex, StencilOperation fail,
+                               StencilOperation depthFail, StencilOperation depthPass) {
+    if (faceIndex >= 2) return;
+    StencilFaceState& state = m_parameters.StencilStates[faceIndex];
+    if (state.FailOp == fail && state.PassDepthFailOp == depthFail &&
+        state.PassDepthPassOp == depthPass) return;
+    state.FailOp = fail;
+    state.PassDepthFailOp = depthFail;
+    state.PassDepthPassOp = depthPass;
+    ++m_version;
+}
+
+const StencilFaceState& RenderState::GetStencilState(uint32_t faceIndex) const {
+    return m_parameters.StencilStates[faceIndex < 2 ? faceIndex : 0];
+}
+
+// --- Color Mask ---
+
+void RenderState::SetColorMask(bool r, bool g, bool b, bool a) {
+    if (m_parameters.ColorMaskR == r && m_parameters.ColorMaskG == g &&
+        m_parameters.ColorMaskB == b && m_parameters.ColorMaskA == a) return;
+    m_parameters.ColorMaskR = r;
+    m_parameters.ColorMaskG = g;
+    m_parameters.ColorMaskB = b;
+    m_parameters.ColorMaskA = a;
+    ++m_version;
+}
+
+void RenderState::GetColorMask(bool* out) const {
+    out[0] = m_parameters.ColorMaskR;
+    out[1] = m_parameters.ColorMaskG;
+    out[2] = m_parameters.ColorMaskB;
+    out[3] = m_parameters.ColorMaskA;
+}
+
+// --- Clear State ---
+
+void RenderState::SetClearColor(float r, float g, float b, float a) {
+    if (m_parameters.ClearColor[0] == r && m_parameters.ClearColor[1] == g &&
+        m_parameters.ClearColor[2] == b && m_parameters.ClearColor[3] == a) return;
+    m_parameters.ClearColor[0] = r;
+    m_parameters.ClearColor[1] = g;
+    m_parameters.ClearColor[2] = b;
+    m_parameters.ClearColor[3] = a;
+    ++m_version;
+}
+
+void RenderState::GetClearColor(float* out) const {
+    out[0] = m_parameters.ClearColor[0];
+    out[1] = m_parameters.ClearColor[1];
+    out[2] = m_parameters.ClearColor[2];
+    out[3] = m_parameters.ClearColor[3];
+}
+
+void RenderState::SetClearDepth(float depth) {
+    if (m_parameters.ClearDepth == depth) return;
+    m_parameters.ClearDepth = depth;
+    ++m_version;
+}
+
+float RenderState::GetClearDepth() const {
+    return m_parameters.ClearDepth;
+}
+
+void RenderState::SetClearStencil(int32_t stencil) {
+    if (m_parameters.ClearStencil == static_cast<uint32_t>(stencil)) return;
+    m_parameters.ClearStencil = static_cast<uint32_t>(stencil);
+    ++m_version;
+}
+
+uint32_t RenderState::GetClearStencil() const {
+    return m_parameters.ClearStencil;
+}
+
+void RenderState::SetBlendColor(float r, float g, float b, float a) {
+    if (m_parameters.BlendColor[0] == r && m_parameters.BlendColor[1] == g &&
+        m_parameters.BlendColor[2] == b && m_parameters.BlendColor[3] == a) return;
+    m_parameters.BlendColor[0] = r;
+    m_parameters.BlendColor[1] = g;
+    m_parameters.BlendColor[2] = b;
+    m_parameters.BlendColor[3] = a;
+    ++m_version;
+}
+
+void RenderState::GetBlendColor(float* out) const {
+    out[0] = m_parameters.BlendColor[0];
+    out[1] = m_parameters.BlendColor[1];
+    out[2] = m_parameters.BlendColor[2];
+    out[3] = m_parameters.BlendColor[3];
+}
+
+void RenderState::SetDepthRange(float nearVal, float farVal) {
+    if (m_parameters.DepthRangeNear == nearVal && m_parameters.DepthRangeFar == farVal) return;
+    m_parameters.DepthRangeNear = nearVal;
+    m_parameters.DepthRangeFar = farVal;
+    ++m_version;
+}
+
+void RenderState::GetDepthRange(float* out) const {
+    out[0] = m_parameters.DepthRangeNear;
+    out[1] = m_parameters.DepthRangeFar;
+}
+
+void RenderState::SetSampleCoverage(float value, bool invert) {
+    if (m_parameters.SampleCoverageValue == value &&
+        m_parameters.SampleCoverageInvert == invert) return;
+    m_parameters.SampleCoverageValue = value;
+    m_parameters.SampleCoverageInvert = invert;
+    ++m_version;
+}
+
+float RenderState::GetSampleCoverageValue() const {
+    return m_parameters.SampleCoverageValue;
+}
+
+bool RenderState::GetSampleCoverageInvert() const {
+    return m_parameters.SampleCoverageInvert;
+}
+
+void RenderState::SetSampleMaskValue(uint32_t mask) {
+    if (m_parameters.SampleMaskValue == mask) return;
+    m_parameters.SampleMaskValue = mask;
+    ++m_version;
+}
+
+uint32_t RenderState::GetSampleMaskValue() const {
+    return m_parameters.SampleMaskValue;
+}
+
+// --- Pixel Store ---
+
+void RenderState::SetPixelStoreParam(PixelStoreParam param, int32_t value) {
+    switch (param) {
+#define SET_PS(paramHead, paramTail) \
+    case PixelStoreParam::paramHead##paramTail: \
+        if (m_pixelStore##paramHead##Parameters.paramTail == value) break; \
+        m_pixelStore##paramHead##Parameters.paramTail = value; \
+        break;
+    SET_PS(Pack, Alignment)
+    SET_PS(Pack, RowLength)
+    SET_PS(Pack, ImageHeight)
+    SET_PS(Pack, SkipPixels)
+    SET_PS(Pack, SkipRows)
+    SET_PS(Pack, SkipImages)
+    case PixelStoreParam::PackSwapBytes:
+        if (m_pixelStorePackParameters.SwapBytes == (value != 0)) break;
+        m_pixelStorePackParameters.SwapBytes = (value != 0);
+        break;
+    case PixelStoreParam::PackLSBFirst:
+        if (m_pixelStorePackParameters.LSBFirst == (value != 0)) break;
+        m_pixelStorePackParameters.LSBFirst = (value != 0);
+        break;
+    SET_PS(Unpack, Alignment)
+    SET_PS(Unpack, RowLength)
+    SET_PS(Unpack, ImageHeight)
+    SET_PS(Unpack, SkipPixels)
+    SET_PS(Unpack, SkipRows)
+    SET_PS(Unpack, SkipImages)
+    case PixelStoreParam::UnpackSwapBytes:
+        if (m_pixelStoreUnpackParameters.SwapBytes == (value != 0)) break;
+        m_pixelStoreUnpackParameters.SwapBytes = (value != 0);
+        break;
+    case PixelStoreParam::UnpackLSBFirst:
+        if (m_pixelStoreUnpackParameters.LSBFirst == (value != 0)) break;
+        m_pixelStoreUnpackParameters.LSBFirst = (value != 0);
+        break;
+    default:
+        break;
+    }
+#undef SET_PS
+}
+
+int32_t RenderState::GetPixelStoreParam(PixelStoreParam param) const {
+    switch (param) {
+#define RETURN_PS(paramHead, paramTail) \
+    case PixelStoreParam::paramHead##paramTail: return m_pixelStore##paramHead##Parameters.paramTail;
+    RETURN_PS(Pack, Alignment)
+    RETURN_PS(Pack, RowLength)
+    RETURN_PS(Pack, ImageHeight)
+    RETURN_PS(Pack, SkipPixels)
+    RETURN_PS(Pack, SkipRows)
+    RETURN_PS(Pack, SkipImages)
+    case PixelStoreParam::PackSwapBytes: return m_pixelStorePackParameters.SwapBytes ? 1 : 0;
+    case PixelStoreParam::PackLSBFirst: return m_pixelStorePackParameters.LSBFirst ? 1 : 0;
+    RETURN_PS(Unpack, Alignment)
+    RETURN_PS(Unpack, RowLength)
+    RETURN_PS(Unpack, ImageHeight)
+    RETURN_PS(Unpack, SkipPixels)
+    RETURN_PS(Unpack, SkipRows)
+    RETURN_PS(Unpack, SkipImages)
+    case PixelStoreParam::UnpackSwapBytes: return m_pixelStoreUnpackParameters.SwapBytes ? 1 : 0;
+    case PixelStoreParam::UnpackLSBFirst: return m_pixelStoreUnpackParameters.LSBFirst ? 1 : 0;
+    default: return 0;
+    }
+#undef RETURN_PS
+}
+
+PixelStoreParameters RenderState::GetPixelStoreParameters(bool isUnpack) const {
+    return isUnpack ? m_pixelStoreUnpackParameters : m_pixelStorePackParameters;
+}
+
+// --- Cull Face ---
+
+void RenderState::SetCullFaceMode(CullFaceMode mode) {
+    if (m_parameters.CullFaceModeSetting == mode) return;
+    m_parameters.CullFaceModeSetting = mode;
+    ++m_version;
+}
+
+CullFaceMode RenderState::GetCullFaceMode() const {
+    return m_parameters.CullFaceModeSetting;
+}
+
+void RenderState::SetFrontFaceMode(FrontFaceMode mode) {
+    if (m_parameters.FrontFaceModeSetting == mode) return;
+    m_parameters.FrontFaceModeSetting = mode;
+    ++m_version;
+}
+
+FrontFaceMode RenderState::GetFrontFaceMode() const {
+    return m_parameters.FrontFaceModeSetting;
+}
+
+void RenderState::SetProvokingVertexMode(ProvokingVertexMode mode) {
+    if (m_parameters.ProvokingVertexModeSetting == mode) return;
+    m_parameters.ProvokingVertexModeSetting = mode;
+    ++m_version;
+}
+
+ProvokingVertexMode RenderState::GetProvokingVertexMode() const {
+    return m_parameters.ProvokingVertexModeSetting;
+}
+
+// --- Scissor ---
+
+void RenderState::SetScissorBox(int32_t x, int32_t y, int32_t width, int32_t height) {
+    if (m_parameters.ScissorBox[0] == x && m_parameters.ScissorBox[1] == y &&
+        m_parameters.ScissorBox[2] == width && m_parameters.ScissorBox[3] == height) return;
+    m_parameters.ScissorBox[0] = x;
+    m_parameters.ScissorBox[1] = y;
+    m_parameters.ScissorBox[2] = width;
+    m_parameters.ScissorBox[3] = height;
+    ++m_version;
+}
+
+void RenderState::GetScissorBox(int32_t* out) const {
+    out[0] = m_parameters.ScissorBox[0];
+    out[1] = m_parameters.ScissorBox[1];
+    out[2] = m_parameters.ScissorBox[2];
+    out[3] = m_parameters.ScissorBox[3];
+}
 
 // ============================================================================
 // GLStateManager::Initialize
@@ -37,6 +639,7 @@ void GLStateManager::Initialize()
     query.Reset();
     transformFeedback.Reset();
     renderbuffer.Reset();
+    errorState.Clear();
 }
 
 void GLStateManager::Shutdown()
@@ -62,6 +665,7 @@ void GLStateManager::Shutdown()
     query.Reset();
     transformFeedback.Reset();
     renderbuffer.Reset();
+    errorState.Clear();
 }
 
 // ============================================================================
