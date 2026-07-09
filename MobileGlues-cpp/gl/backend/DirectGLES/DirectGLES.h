@@ -1,0 +1,133 @@
+// MobileGlues - gl/backend/DirectGLES/DirectGLES.h
+// DirectGLES backend implementation for GL Core Profile → GLES 3.2 translation
+// Architecture inspired by MobileGL-DirectGLES
+//
+// Copyright (c) 2025-2026 MobileGL-Dev
+// Licensed under the GNU Lesser General Public License v2.1:
+//   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
+// SPDX-License-Identifier: LGPL-2.1-only
+// End of Source File Header
+
+#pragma once
+
+#include "../../../includes.h"
+#include <MG_State/GLState/FramebufferState/FramebufferObject.h>
+#include <MG_State/GLState/TextureState/TextureState.h>
+#include <MG_State/GLState/SamplerState/SamplerObject.h>
+#include <MG_Util/BackendLoaders/OpenGL/Loader.h>
+
+#define CallAndCheckGLES(operation)                                                                                        \
+    MG_LOG_DEBUG("Call GLES func: %s", #operation);                                                                      \
+    operation Utils::CheckGLESError();
+
+namespace MobileGL::backend::DirectGLES {
+
+using namespace MG_External;
+
+// Draw command structures matching GLES 3.2
+struct DrawElementsIndirectCommand {
+    Uint32 count = 0;
+    Uint32 instanceCount = 0;
+    Uint32 firstIndex = 0;
+    Int32 baseVertex = 0;
+    Uint32 baseInstance = 0;
+};
+
+struct DrawArraysIndirectCommand {
+    Uint32 count = 0;
+    Uint32 instanceCount = 0;
+    Uint32 first = 0;
+    Uint32 baseInstance = 0;
+};
+
+// Core drawing functions
+void ClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil);
+void ClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value);
+void ClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value);
+void ClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value);
+void Clear(GLbitfield mask);
+void DrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
+void DrawArrays(GLenum mode, GLint first, GLsizei count);
+void DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex);
+void MultiDrawElements(GLenum mode, const GLsizei* count, GLenum type, const GLvoid* const* indices,
+                       GLsizei drawcount);
+void MultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum type, const GLvoid* const* indices,
+                                 GLsizei drawcount, const GLint* basevertex);
+void MultiDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect, GLsizei drawcount, GLsizei stride);
+void MultiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect, GLintptr drawcount,
+                                    GLsizei maxdrawcount, GLsizei stride);
+void MultiDrawArraysIndirect(GLenum mode, const void* indirect, GLsizei drawcount, GLsizei stride);
+void DrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type,
+                                 const void* indices, GLint basevertex);
+void DrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices);
+void DrawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices,
+                                                 GLsizei instancecount, GLint basevertex, GLuint baseinstance);
+void DrawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices,
+                                     GLsizei instancecount, GLint basevertex);
+void DrawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices,
+                                       GLsizei instancecount, GLuint baseinstance);
+void DrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount);
+void DrawElementsIndirect(GLenum mode, GLenum type, const void* indirect);
+void DrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount,
+                                     GLuint baseinstance);
+void DrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount);
+void DrawArraysIndirect(GLenum mode, const void* indirect);
+void ClearNamedFramebufferfv(const SharedPtr<MG_State::GLState::FramebufferObject>& framebuffer,
+                             GLenum buffer, GLint drawbuffer, const GLfloat* value);
+void ClearNamedFramebufferfi(const SharedPtr<MG_State::GLState::FramebufferObject>& framebuffer,
+                             GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil);
+void BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1,
+                     GLint dstY1, GLbitfield mask, GLenum filter);
+void BlitNamedFramebuffer(const SharedPtr<MG_State::GLState::FramebufferObject>& readFramebuffer,
+                          const SharedPtr<MG_State::GLState::FramebufferObject>& drawFramebuffer,
+                          GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                          GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                          GLbitfield mask, GLenum filter);
+void CopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width,
+                    GLsizei height, GLint border);
+void CopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width,
+                       GLsizei height);
+void CopyImageSubData(const SharedPtr<MG_State::GLState::ITextureObject>& srcTexture,
+                      GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ,
+                      const SharedPtr<MG_State::GLState::ITextureObject>& dstTexture,
+                      GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ,
+                      GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth);
+void GenerateMipmap(GLenum target);
+const GLubyte* GetString(GLenum name);
+void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels);
+void GetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoid* pixels);
+void DispatchCompute(GLuint numGroupsX, GLuint numGroupsY, GLuint numGroupsZ);
+void DispatchComputeIndirect(GLintptr indirect);
+void MemoryBarrier(GLbitfield barriers);
+void MemoryBarrierByRegion(GLbitfield barriers);
+void BindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access,
+                      GLenum format);
+void GetIntegeri_v(GLenum target, GLuint index, GLint* data);
+void GetInteger64i_v(GLenum target, GLuint index, GLint64* data);
+void GetProgramiv(GLuint program, GLenum pname, GLint* params);
+void GetProgramInterfaceiv(GLuint program, GLenum programInterface, GLenum pname, GLint* params);
+GLuint GetProgramResourceIndex(GLuint program, GLenum programInterface, const GLchar* name);
+void GetProgramResourceName(GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei* length,
+                            GLchar* name);
+void GetProgramResourceiv(GLuint program, GLenum programInterface, GLuint index, GLsizei propCount,
+                          const GLenum* props, GLsizei bufSize, GLsizei* length, GLint* params);
+GLint GetProgramResourceLocation(GLuint program, GLenum programInterface, const GLchar* name);
+GLint GetProgramResourceLocationIndex(GLuint program, GLenum programInterface, const GLchar* name);
+void ShaderStorageBlockBinding(GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding);
+
+// EGL/Backend initialization
+Bool InitWindowSurface(NativeWindowType window);
+Bool InitPbufferSurface(EGLint width, EGLint height);
+Bool MakeCurrent();
+Bool ReleaseCurrent();
+void Present();
+void SetEGLFuncsTable(const EGLFunctionsTable& eglFuncs);
+void SetGLESFuncsTable(const GLESFunctionsTable& glesFuncs);
+void SetGLESCapabilities(const GLESCapabilities& capabilities);
+void DestroyEGLContext();
+
+extern EGLFunctionsTable g_EGLFuncs;
+extern GLESFunctionsTable g_GLESFuncs;
+extern GLESCapabilities g_GLESCapabilities;
+
+} // namespace MobileGL::backend::DirectGLES
