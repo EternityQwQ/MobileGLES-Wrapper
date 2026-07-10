@@ -34,17 +34,23 @@ public:
         MOBILEGL_ASSERT(stateObj != nullptr, "State object must not be null");
 
         auto* key = stateObj.get();
-        auto trackedStateIt = m_stateRefs.find(key);
-        if (trackedStateIt != m_stateRefs.end() && trackedStateIt->second.expired()) {
-            EraseByKey(key);
+        // Check for stale state ref and clean up both maps in one pass
+        auto trackedIt = m_stateRefs.find(key);
+        if (trackedIt != m_stateRefs.end() && trackedIt->second.expired()) {
+            m_stateRefs.erase(trackedIt);
+            m_backendObjects.erase(key);
         }
         m_stateRefs[key] = stateObj;
         return m_backendObjects[key];
     }
 
     iterator find(StateObject* stateObj) {
-        if (!IsAlive(stateObj)) {
-            EraseByKey(stateObj);
+        auto trackedIt = m_stateRefs.find(stateObj);
+        if (trackedIt == m_stateRefs.end() || trackedIt->second.expired()) {
+            if (trackedIt != m_stateRefs.end()) {
+                m_stateRefs.erase(trackedIt);
+            }
+            m_backendObjects.erase(stateObj);
             return m_backendObjects.end();
         }
         return m_backendObjects.find(stateObj);
@@ -295,6 +301,7 @@ public:
     Uint GetBackendGlobalUBOId() const { return m_backendGlobalUBOId; }
     Uint32 GetSnormFallbackClampOutputMask() const { return m_snormFallbackClampOutputMask; }
     Uint32 GetUnormFallbackClampOutputMask() const { return m_unormFallbackClampOutputMask; }
+    GLint GetCachedUniformLocation(const String& name);
 
 private:
     Uint m_backendProgramId = 0;
@@ -303,6 +310,7 @@ private:
     Uint32 m_snormFallbackClampOutputMask = 0;
     Uint32 m_unormFallbackClampOutputMask = 0;
     Bool m_isInitialized = false;
+    UnorderedMap<String, GLint> m_cachedUniformLocations;
 };
 
 extern Uint32 g_snormFallbackClampOutputMask;
