@@ -301,7 +301,26 @@ public:
     Uint GetBackendGlobalUBOId() const { return m_backendGlobalUBOId; }
     Uint32 GetSnormFallbackClampOutputMask() const { return m_snormFallbackClampOutputMask; }
     Uint32 GetUnormFallbackClampOutputMask() const { return m_unormFallbackClampOutputMask; }
-    GLint GetCachedUniformLocation(const String& name);
+    GLint GetCachedUniformLocation(const String& name) {
+        auto it = m_cachedUniformLocations.find(name);
+        if (it != m_cachedUniformLocations.end()) return it->second;
+        GLint loc = g_GLESFuncs.glGetUniformLocation(m_backendProgramId, name.c_str());
+        m_cachedUniformLocations[name] = loc;
+        return loc;
+    }
+
+    GLuint GetCachedUniformBlockIndex(const String& name) {
+        auto it = m_cachedUniformBlockIndices.find(name);
+        if (it != m_cachedUniformBlockIndices.end()) return it->second;
+        GLuint idx = g_GLESFuncs.glGetUniformBlockIndex(m_backendProgramId, name.c_str());
+        m_cachedUniformBlockIndices[name] = idx;
+        return idx;
+    }
+
+    void ClearCachedQueries() {
+        m_cachedUniformLocations.clear();
+        m_cachedUniformBlockIndices.clear();
+    }
 
 private:
     Uint m_backendProgramId = 0;
@@ -311,6 +330,7 @@ private:
     Uint32 m_unormFallbackClampOutputMask = 0;
     Bool m_isInitialized = false;
     UnorderedMap<String, GLint> m_cachedUniformLocations;
+    UnorderedMap<String, GLuint> m_cachedUniformBlockIndices;
 };
 
 extern Uint32 g_snormFallbackClampOutputMask;

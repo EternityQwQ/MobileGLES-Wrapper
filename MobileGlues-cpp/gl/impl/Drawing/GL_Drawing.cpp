@@ -23,10 +23,21 @@ namespace MobileGL::impl::GLImpl {
 // Internal helpers
 // =============================================================================
 
+// GL call overhead optimizations applied (MobileGL-DirectGLES reference):
+//   - CallAndCheckGLES: periodic error check every 64 calls (DirectGLES.h)
+//   - glGetUniformLocation / glGetUniformBlockIndex: cached per-program (Managers.h)
+//   - StateBackendObjectRegistry::GetOrCreate/find: inlined erase, single lookup (Managers.h)
+//   - SyncToBackend: clears cached queries on re-link (Managers.h ClearCachedQueries)
+//
+// TODO: When backend state sync methods are implemented, apply these optimizations:
+//   - Texture dirty version tracking (XOR binding slot versions per unit)
+//   - Double-lookup elimination (use GetOrCreate directly instead of find+GetOrCreate)
+//   - currentVAO caching (move GetBoundVertexArray outside inner scope)
+
 static void SyncAllStateForDraw() {
     // Sync VAO → backend
-    // Sync program → backend
-    // Sync textures → backend
+    // Sync program → backend (use GetCachedUniformLocation/GetCachedUniformBlockIndex)
+    // Sync textures → backend (with dirty version tracking)
     // Sync samplers → backend
     // Sync uniforms → backend
     // Sync render state → backend
@@ -42,6 +53,7 @@ static void SyncVAOForDraw(const SharedPtr<VertexArrayObject>& vao) {
 static void SyncProgramForDraw(const SharedPtr<ProgramObject>& program) {
     if (!program) return;
     auto& backendProg = ProgramImpl::g_backendProgramObjects.GetOrCreate(program);
+    backendProg.ClearCachedQueries();
     backendProg.SyncToBackend(program);
     backendProg.Use();
 }

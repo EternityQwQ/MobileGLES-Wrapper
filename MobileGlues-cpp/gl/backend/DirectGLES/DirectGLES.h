@@ -18,7 +18,11 @@
 
 #define CallAndCheckGLES(operation)                                                                                        \
     MG_LOG_DEBUG("Call GLES func: %s", #operation);                                                                      \
-    operation Utils::CheckGLESError();
+    operation;                                                                                                           \
+    do {                                                                                                                 \
+        static thread_local Uint32 g_glesCallCounter = 0;                                                                \
+        if (++g_glesCallCounter % 64 == 0) Utils::CheckGLESError();                                                      \
+    } while (0)
 
 namespace MobileGL::backend::DirectGLES {
 
