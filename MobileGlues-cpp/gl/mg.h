@@ -11,15 +11,9 @@
 #pragma once
 
 #include "state.h"
-#include "state/Core.h"
 #include <EGL/egl.h>
 #include "../gles/gles.h"
 #include "glext.h"
-
-// Forward declaration for convenience accessors
-namespace MobileGL::MG_Backend {
-class BackendObject;
-}
 
 // Include the loader handle extern (defined in gles/loader.cpp)
 extern void* g_loader_handle;
@@ -39,30 +33,6 @@ extern void* g_loader_handle;
 #define current_draw_fbo GLState.currentDrawFBO
 #define current_read_fbo GLState.framebuffer.readFBO
 #define is_draw_call     GLState.isDrawCall
-
-// ============================================================================
-// CPU-GPU Symbiotic Context convenience accessors
-// ============================================================================
-
-// Access the backend from the unified CPU+GPU context
-inline MG_Backend::BackendObject* GetBackend() {
-    return GLContext::Get().GetBackend();
-}
-
-// Access the EGL display from the context
-inline EGLDisplay GetEGLDisplay() {
-    return GLContext::Get().GetEGLDisplay();
-}
-
-// Access the EGL context from the context
-inline EGLContext GetEGLContext() {
-    return GLContext::Get().GetEGLContext();
-}
-
-// Convenience: check if the symbiotic context is fully initialized
-inline bool IsContextInitialized() {
-    return GLContext::Get().IsInitialized();
-}
 
 // Old buffer map aliases
 #define buffer_map          GLState.buffer.bufferMap

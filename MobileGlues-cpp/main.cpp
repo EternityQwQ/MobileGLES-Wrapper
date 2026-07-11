@@ -13,7 +13,6 @@
 #include "gl/gl.h"
 #include "gl/log.h"
 #include "gl/mg.h"
-#include "gl/state/Core.h"
 #include "gles/loader.h"
 #include "includes.h"
 #include <cerrno>
@@ -63,12 +62,6 @@ void proc_init() {
     init_target_egl();
     init_target_gles();
     set_multidraw_setting();
-
-    // Activate the CPU+GPU symbiotic context
-    // The GLContext now owns both CPU state (GLStateManager) and will own
-    // the GPU backend (BackendObject) once InitWindowSurface/InitPbufferSurface
-    // is called by the application.
-    GLContext::SetActive(&GLContext::Get());
 
     init_settings_post();
 
