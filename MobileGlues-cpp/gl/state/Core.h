@@ -22,6 +22,12 @@
 #include "../state.h"
 #include <EGL/egl.h>
 
+// state.h 定义了 #define GLState GLStateManager::Instance() 宏，
+// 这会污染 namespace MobileGL::MG_State::GLState 的声明。
+// 在此处暂存并取消宏定义，命名空间声明结束后恢复。
+#pragma push_macro("GLState")
+#undef GLState
+
 namespace MobileGL::MG_Backend {
 class BackendObject;
 }
@@ -274,3 +280,5 @@ private:
 using VertexAttributeVersion = VersionType;
 
 } // namespace MobileGL::MG_State::GLState
+
+#pragma pop_macro("GLState")

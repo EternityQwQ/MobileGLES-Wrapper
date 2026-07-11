@@ -12,10 +12,14 @@
 
 #include "state.h"
 #include "state/Core.h"
-#include "backend/BackendObject.h"
 #include <EGL/egl.h>
 #include "../gles/gles.h"
 #include "glext.h"
+
+// Forward declaration for convenience accessors
+namespace MobileGL::MG_Backend {
+class BackendObject;
+}
 
 // Include the loader handle extern (defined in gles/loader.cpp)
 extern void* g_loader_handle;
