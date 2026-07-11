@@ -96,6 +96,13 @@ public:
         m_overflow.clear();
     }
 
+    void reserve(size_t n) {
+        if (n <= kFastIdMapFlatSize) {
+            m_flat.reserve(n);
+        }
+        // overflow map doesn't need explicit reserve
+    }
+
     bool contains(GLuint key) const {
         return lookup(key) != 0;
     }
