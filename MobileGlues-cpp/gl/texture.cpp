@@ -260,8 +260,11 @@ void MarkTextureObjectForDeletion(unsigned texture) {
 
     auto textureObject = BufferObjectsVec[texture];
 
-    // Use reverse mapping to find and clear only the slots that reference this object
-    for (auto slotPtr : textureObject->binding_slots) {
+    // Copy the binding_slots before iteration: Bind(nullptr) calls
+    // m_boundObject->binding_slots.erase() which would invalidate
+    // the iterator if we iterated the original set directly.
+    auto slots = textureObject->binding_slots;
+    for (auto slotPtr : slots) {
         auto* slot = reinterpret_cast<TextureBindingSlot*>(slotPtr);
         slot->Bind(nullptr);
     }

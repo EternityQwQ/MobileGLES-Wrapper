@@ -75,9 +75,6 @@ void ErrorState::Clear() {
 // --- Rasterization ---
 
 void RenderState::SetViewport(int32_t x, int32_t y, int32_t width, int32_t height) {
-    if (m_parameters.Viewport[0] == x && m_parameters.Viewport[1] == y &&
-        m_parameters.Viewport[2] == width && m_parameters.Viewport[3] == height) return;
-
     m_parameters.Viewport[0] = x;
     m_parameters.Viewport[1] = y;
     m_parameters.Viewport[2] = width;
@@ -93,7 +90,6 @@ void RenderState::GetViewport(int32_t* out) const {
 }
 
 void RenderState::SetLineWidth(float width) {
-    if (m_parameters.LineWidth == width) return;
     m_parameters.LineWidth = width;
     ++m_version;
 }
@@ -103,7 +99,6 @@ float RenderState::GetLineWidth() const {
 }
 
 void RenderState::SetPointSize(float size) {
-    if (m_parameters.PointSize == size) return;
     m_parameters.PointSize = size;
     ++m_version;
 }
@@ -113,9 +108,6 @@ float RenderState::GetPointSize() const {
 }
 
 void RenderState::SetPolygonOffset(float factor, float units) {
-    if (m_parameters.PolygonOffsetFactor == factor &&
-        m_parameters.PolygonOffsetUnits == units) return;
-
     m_parameters.PolygonOffsetFactor = factor;
     m_parameters.PolygonOffsetUnits = units;
     ++m_version;
@@ -134,7 +126,6 @@ float RenderState::GetPolygonOffsetUnits() const {
 void RenderState::SetCapability(Capability cap, bool enabled) {
 #define SET_CAP(capName, field) \
     case Capability::capName: \
-        if (m_parameters.field == enabled) break; \
         m_parameters.field = enabled; \
         ++m_version; \
         break;
@@ -163,13 +154,10 @@ void RenderState::SetCapability(Capability cap, bool enabled) {
         SET_CAP(StencilTest, StencilTestEnabled)
         SET_CAP(ProgramPointSize, ProgramPointSizeEnabled)
     case Capability::Blend: {
-        bool stateChanged = false;
         for (auto& blendState : m_parameters.BlendStates) {
-            if (blendState.Enabled == enabled) continue;
             blendState.Enabled = enabled;
-            stateChanged = true;
         }
-        if (stateChanged) ++m_version;
+        ++m_version;
         break;
     }
     default:
@@ -215,7 +203,6 @@ bool RenderState::IsCapabilityEnabled(Capability cap) const {
 void RenderState::SetCapabilityIndexed(Capability cap, uint32_t index, bool enabled) {
     if (cap != Capability::Blend) return;
     if (index >= static_cast<uint32_t>(MAX_DRAW_BUFFERS)) return;
-    if (m_parameters.BlendStates[index].Enabled == enabled) return;
     m_parameters.BlendStates[index].Enabled = enabled;
     ++m_version;
 }
@@ -230,19 +217,12 @@ bool RenderState::IsCapabilityEnabledIndexed(Capability cap, uint32_t index) con
 
 void RenderState::SetBlendFunc(BlendFactor srcRGB, BlendFactor dstRGB,
                                BlendFactor srcAlpha, BlendFactor dstAlpha) {
-    bool stateChanged = false;
     for (auto& blendState : m_parameters.BlendStates) {
-        if (blendState.SrcFactorRGB == srcRGB && blendState.DstFactorRGB == dstRGB &&
-            blendState.SrcFactorAlpha == srcAlpha && blendState.DstFactorAlpha == dstAlpha) {
-            continue;
-        }
         blendState.SrcFactorRGB = srcRGB;
         blendState.DstFactorRGB = dstRGB;
         blendState.SrcFactorAlpha = srcAlpha;
         blendState.DstFactorAlpha = dstAlpha;
-        stateChanged = true;
     }
-    if (!stateChanged) return;
     ++m_version;
 }
 
@@ -258,10 +238,6 @@ void RenderState::SetBlendFuncIndexed(uint32_t index, BlendFactor srcRGB, BlendF
                                       BlendFactor srcAlpha, BlendFactor dstAlpha) {
     if (index >= static_cast<uint32_t>(MAX_DRAW_BUFFERS)) return;
     PerBufferBlendState& blendState = m_parameters.BlendStates[index];
-    if (blendState.SrcFactorRGB == srcRGB && blendState.DstFactorRGB == dstRGB &&
-        blendState.SrcFactorAlpha == srcAlpha && blendState.DstFactorAlpha == dstAlpha) {
-        return;
-    }
     blendState.SrcFactorRGB = srcRGB;
     blendState.DstFactorRGB = dstRGB;
     blendState.SrcFactorAlpha = srcAlpha;
@@ -279,14 +255,10 @@ void RenderState::GetBlendFuncIndexed(uint32_t index, BlendFactor& srcRGB, Blend
 }
 
 void RenderState::SetBlendEquation(BlendEquation color, BlendEquation alpha) {
-    bool stateChanged = false;
     for (auto& blendState : m_parameters.BlendStates) {
-        if (blendState.ColorEquation == color && blendState.AlphaEquation == alpha) continue;
         blendState.ColorEquation = color;
         blendState.AlphaEquation = alpha;
-        stateChanged = true;
     }
-    if (!stateChanged) return;
     ++m_version;
 }
 
@@ -298,7 +270,6 @@ void RenderState::GetBlendEquation(BlendEquation& color, BlendEquation& alpha) c
 void RenderState::SetBlendEquationIndexed(uint32_t index, BlendEquation color, BlendEquation alpha) {
     if (index >= static_cast<uint32_t>(MAX_DRAW_BUFFERS)) return;
     PerBufferBlendState& blendState = m_parameters.BlendStates[index];
-    if (blendState.ColorEquation == color && blendState.AlphaEquation == alpha) return;
     blendState.ColorEquation = color;
     blendState.AlphaEquation = alpha;
     ++m_version;
@@ -311,7 +282,6 @@ void RenderState::GetBlendEquationIndexed(uint32_t index, BlendEquation& color, 
 }
 
 void RenderState::SetLogicOp(LogicOperation logicOp) {
-    if (m_parameters.LogicOp == logicOp) return;
     m_parameters.LogicOp = logicOp;
     ++m_version;
 }
@@ -323,7 +293,6 @@ LogicOperation RenderState::GetLogicOp() const {
 // --- Depth ---
 
 void RenderState::SetDepthFunc(DepthTestFunc func) {
-    if (m_parameters.DepthFunc == func) return;
     m_parameters.DepthFunc = func;
     ++m_version;
 }
@@ -333,7 +302,6 @@ DepthTestFunc RenderState::GetDepthFunc() const {
 }
 
 void RenderState::SetDepthMask(bool flag) {
-    if (m_parameters.DepthMask == flag) return;
     m_parameters.DepthMask = flag;
     ++m_version;
 }
@@ -345,7 +313,6 @@ bool RenderState::GetDepthMask() const {
 void RenderState::SetStencilFunc(uint32_t faceIndex, DepthTestFunc func, int32_t ref, uint32_t mask) {
     if (faceIndex >= 2) return;
     StencilFaceState& state = m_parameters.StencilStates[faceIndex];
-    if (state.Func == func && state.Ref == ref && state.ValueMask == mask) return;
     state.Func = func;
     state.Ref = ref;
     state.ValueMask = mask;
@@ -355,7 +322,6 @@ void RenderState::SetStencilFunc(uint32_t faceIndex, DepthTestFunc func, int32_t
 void RenderState::SetStencilMask(uint32_t faceIndex, uint32_t mask) {
     if (faceIndex >= 2) return;
     StencilFaceState& state = m_parameters.StencilStates[faceIndex];
-    if (state.WriteMask == mask) return;
     state.WriteMask = mask;
     ++m_version;
 }
@@ -364,8 +330,6 @@ void RenderState::SetStencilOp(uint32_t faceIndex, StencilOperation fail,
                                StencilOperation depthFail, StencilOperation depthPass) {
     if (faceIndex >= 2) return;
     StencilFaceState& state = m_parameters.StencilStates[faceIndex];
-    if (state.FailOp == fail && state.PassDepthFailOp == depthFail &&
-        state.PassDepthPassOp == depthPass) return;
     state.FailOp = fail;
     state.PassDepthFailOp = depthFail;
     state.PassDepthPassOp = depthPass;
@@ -379,8 +343,6 @@ const StencilFaceState& RenderState::GetStencilState(uint32_t faceIndex) const {
 // --- Color Mask ---
 
 void RenderState::SetColorMask(bool r, bool g, bool b, bool a) {
-    if (m_parameters.ColorMaskR == r && m_parameters.ColorMaskG == g &&
-        m_parameters.ColorMaskB == b && m_parameters.ColorMaskA == a) return;
     m_parameters.ColorMaskR = r;
     m_parameters.ColorMaskG = g;
     m_parameters.ColorMaskB = b;
@@ -398,8 +360,6 @@ void RenderState::GetColorMask(bool* out) const {
 // --- Clear State ---
 
 void RenderState::SetClearColor(float r, float g, float b, float a) {
-    if (m_parameters.ClearColor[0] == r && m_parameters.ClearColor[1] == g &&
-        m_parameters.ClearColor[2] == b && m_parameters.ClearColor[3] == a) return;
     m_parameters.ClearColor[0] = r;
     m_parameters.ClearColor[1] = g;
     m_parameters.ClearColor[2] = b;
@@ -415,7 +375,6 @@ void RenderState::GetClearColor(float* out) const {
 }
 
 void RenderState::SetClearDepth(float depth) {
-    if (m_parameters.ClearDepth == depth) return;
     m_parameters.ClearDepth = depth;
     ++m_version;
 }
@@ -425,7 +384,6 @@ float RenderState::GetClearDepth() const {
 }
 
 void RenderState::SetClearStencil(int32_t stencil) {
-    if (m_parameters.ClearStencil == static_cast<uint32_t>(stencil)) return;
     m_parameters.ClearStencil = static_cast<uint32_t>(stencil);
     ++m_version;
 }
@@ -435,8 +393,6 @@ uint32_t RenderState::GetClearStencil() const {
 }
 
 void RenderState::SetBlendColor(float r, float g, float b, float a) {
-    if (m_parameters.BlendColor[0] == r && m_parameters.BlendColor[1] == g &&
-        m_parameters.BlendColor[2] == b && m_parameters.BlendColor[3] == a) return;
     m_parameters.BlendColor[0] = r;
     m_parameters.BlendColor[1] = g;
     m_parameters.BlendColor[2] = b;
@@ -452,7 +408,6 @@ void RenderState::GetBlendColor(float* out) const {
 }
 
 void RenderState::SetDepthRange(float nearVal, float farVal) {
-    if (m_parameters.DepthRangeNear == nearVal && m_parameters.DepthRangeFar == farVal) return;
     m_parameters.DepthRangeNear = nearVal;
     m_parameters.DepthRangeFar = farVal;
     ++m_version;
@@ -464,8 +419,6 @@ void RenderState::GetDepthRange(float* out) const {
 }
 
 void RenderState::SetSampleCoverage(float value, bool invert) {
-    if (m_parameters.SampleCoverageValue == value &&
-        m_parameters.SampleCoverageInvert == invert) return;
     m_parameters.SampleCoverageValue = value;
     m_parameters.SampleCoverageInvert = invert;
     ++m_version;
@@ -480,7 +433,6 @@ bool RenderState::GetSampleCoverageInvert() const {
 }
 
 void RenderState::SetSampleMaskValue(uint32_t mask) {
-    if (m_parameters.SampleMaskValue == mask) return;
     m_parameters.SampleMaskValue = mask;
     ++m_version;
 }
@@ -495,7 +447,6 @@ void RenderState::SetPixelStoreParam(PixelStoreParam param, int32_t value) {
     switch (param) {
 #define SET_PS(paramHead, paramTail) \
     case PixelStoreParam::paramHead##paramTail: \
-        if (m_pixelStore##paramHead##Parameters.paramTail == value) break; \
         m_pixelStore##paramHead##Parameters.paramTail = value; \
         break;
     SET_PS(Pack, Alignment)
@@ -505,11 +456,9 @@ void RenderState::SetPixelStoreParam(PixelStoreParam param, int32_t value) {
     SET_PS(Pack, SkipRows)
     SET_PS(Pack, SkipImages)
     case PixelStoreParam::PackSwapBytes:
-        if (m_pixelStorePackParameters.SwapBytes == (value != 0)) break;
         m_pixelStorePackParameters.SwapBytes = (value != 0);
         break;
     case PixelStoreParam::PackLSBFirst:
-        if (m_pixelStorePackParameters.LSBFirst == (value != 0)) break;
         m_pixelStorePackParameters.LSBFirst = (value != 0);
         break;
     SET_PS(Unpack, Alignment)
@@ -519,11 +468,9 @@ void RenderState::SetPixelStoreParam(PixelStoreParam param, int32_t value) {
     SET_PS(Unpack, SkipRows)
     SET_PS(Unpack, SkipImages)
     case PixelStoreParam::UnpackSwapBytes:
-        if (m_pixelStoreUnpackParameters.SwapBytes == (value != 0)) break;
         m_pixelStoreUnpackParameters.SwapBytes = (value != 0);
         break;
     case PixelStoreParam::UnpackLSBFirst:
-        if (m_pixelStoreUnpackParameters.LSBFirst == (value != 0)) break;
         m_pixelStoreUnpackParameters.LSBFirst = (value != 0);
         break;
     default:
@@ -564,7 +511,6 @@ PixelStoreParameters RenderState::GetPixelStoreParameters(bool isUnpack) const {
 // --- Cull Face ---
 
 void RenderState::SetCullFaceMode(CullFaceMode mode) {
-    if (m_parameters.CullFaceModeSetting == mode) return;
     m_parameters.CullFaceModeSetting = mode;
     ++m_version;
 }
@@ -574,7 +520,6 @@ CullFaceMode RenderState::GetCullFaceMode() const {
 }
 
 void RenderState::SetFrontFaceMode(FrontFaceMode mode) {
-    if (m_parameters.FrontFaceModeSetting == mode) return;
     m_parameters.FrontFaceModeSetting = mode;
     ++m_version;
 }
@@ -584,7 +529,6 @@ FrontFaceMode RenderState::GetFrontFaceMode() const {
 }
 
 void RenderState::SetProvokingVertexMode(ProvokingVertexMode mode) {
-    if (m_parameters.ProvokingVertexModeSetting == mode) return;
     m_parameters.ProvokingVertexModeSetting = mode;
     ++m_version;
 }
@@ -596,8 +540,6 @@ ProvokingVertexMode RenderState::GetProvokingVertexMode() const {
 // --- Scissor ---
 
 void RenderState::SetScissorBox(int32_t x, int32_t y, int32_t width, int32_t height) {
-    if (m_parameters.ScissorBox[0] == x && m_parameters.ScissorBox[1] == y &&
-        m_parameters.ScissorBox[2] == width && m_parameters.ScissorBox[3] == height) return;
     m_parameters.ScissorBox[0] = x;
     m_parameters.ScissorBox[1] = y;
     m_parameters.ScissorBox[2] = width;
