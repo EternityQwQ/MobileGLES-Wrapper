@@ -1,5 +1,13 @@
 // MobileGlues - gl/state/Core.h
 // GL State Core - Central state management for GL Core Profile → GLES 3.2
+//
+// Architecture: "CPU-GPU Symbiotic Context"
+//   GLContext is the unified context that completely binds CPU-side state
+//   tracking (GLStateManager) with GPU-side backend resources (BackendObject,
+//   EGLDisplay, EGLContext, EGLSurface). They are inseparable — created
+//   together, live together, and destroyed together. No more separate
+//   singletons.
+//
 // Architecture inspired by MobileGL-DirectGLES
 //
 // Copyright (c) 2025-2026 MobileGL-Dev
@@ -11,7 +19,18 @@
 #pragma once
 
 #include "../../includes.h"
-#include "../../state.h"
+#include "../state.h"
+#include <EGL/egl.h>
+
+// state.h 定义了 #define GLState GLStateManager::Instance() 宏，
+// 这会污染 namespace MobileGL::MG_State::GLState 的声明。
+// 在此处暂存并取消宏定义，命名空间声明结束后恢复。
+#pragma push_macro("GLState")
+#undef GLState
+
+namespace MobileGL::MG_Backend {
+class BackendObject;
+}
 
 namespace MobileGL::MG_State::GLState {
 
@@ -29,7 +48,12 @@ class RenderbufferObject;
 using VersionType = Uint16;
 
 // =============================================================================
-// Core GL Context
+// CPU-GPU Symbiotic Context — GPU主导，CPU绑定
+//
+// GLContext将CPU状态跟踪和GPU后端资源绑定为一体：
+//   - GPU优先：GPU后端先创建，CPU状态随后绑定，二者共生
+//   - 通过SetBackend()将GPU后端注入Context，CPU状态随之初始化
+//   - 共同存活，共同销毁
 // =============================================================================
 
 class GLContext {
@@ -37,9 +61,55 @@ public:
     GLContext();
     ~GLContext();
 
+    // -------------------------------------------------------------------------
+    // Lifecycle: GPU主导，CPU跟随绑定
+    // -------------------------------------------------------------------------
+
+    /// 初始化CPU状态。GPU后端通过SetBackend()单独注入。
+    void Initialize();
+
+    /// 关闭CPU状态和GPU后端——两者同时释放。
+    void Shutdown();
+
+    /// 返回true当CPU和GPU都已初始化。
+    Bool IsInitialized() const { return m_initialized; }
+
+    // -------------------------------------------------------------------------
+    // GPU Backend（GPU优先：通过SetBackend注入，Context接管所有权）
+    // -------------------------------------------------------------------------
+
+    MG_Backend::BackendObject* GetBackend() { return m_backend.get(); }
+    const MG_Backend::BackendObject* GetBackend() const { return m_backend.get(); }
+
+    /// 将GPU后端绑定到Context——Context接管所有权。
+    void SetBackend(UniquePtr<MG_Backend::BackendObject> backend);
+
+    // -------------------------------------------------------------------------
+    // EGL Resource Access
+    // -------------------------------------------------------------------------
+
+    EGLDisplay GetEGLDisplay() const { return m_eglDisplay; }
+    EGLContext GetEGLContext() const { return m_eglContext; }
+    EGLSurface GetEGLSurface() const { return m_eglSurface; }
+
+    void SetEGLDisplay(EGLDisplay dpy) { m_eglDisplay = dpy; }
+    void SetEGLContext(EGLContext ctx) { m_eglContext = ctx; }
+    void SetEGLSurface(EGLSurface surf) { m_eglSurface = surf; }
+
+    // -------------------------------------------------------------------------
+    // Active Context (thread-local or global fallback)
+    // -------------------------------------------------------------------------
+
+    /// Get the currently active GLContext (for backward compatibility).
     static GLContext& Get();
 
+    /// Set the currently active GLContext.
+    static void SetActive(GLContext* ctx);
+
+    // -------------------------------------------------------------------------
     // Object management
+    // -------------------------------------------------------------------------
+
     void CreateBuffer(GLuint id);
     void CreateVertexArray(GLuint id);
     void CreateTexture(GLuint id);
@@ -76,7 +146,10 @@ public:
     Bool IsSampler(GLuint id) const;
     Bool IsRenderbuffer(GLuint id) const;
 
-    // State management
+    // -------------------------------------------------------------------------
+    // CPU State Management
+    // -------------------------------------------------------------------------
+
     GLStateManager& GetStateManager() { return m_stateManager; }
     const GLStateManager& GetStateManager() const { return m_stateManager; }
 
@@ -85,10 +158,18 @@ public:
     VersionType GetVersion() const;
 
 private:
+    // ---- CPU-side state (symbiotic partner 1) ----
     GLStateManager m_stateManager;
     VersionType m_version = 0;
 
-    // Object registries
+    // ---- GPU-side resources (symbiotic partner 2) ----
+    UniquePtr<MG_Backend::BackendObject> m_backend;
+    EGLDisplay m_eglDisplay = EGL_NO_DISPLAY;
+    EGLContext m_eglContext = EGL_NO_CONTEXT;
+    EGLSurface m_eglSurface = EGL_NO_SURFACE;
+    Bool m_initialized = false;
+
+    // ---- Object registries (CPU-side object tracking) ----
     UnorderedMap<GLuint, SharedPtr<BufferObject>> m_buffers;
     UnorderedMap<GLuint, SharedPtr<VertexArrayObject>> m_vertexArrays;
     UnorderedMap<GLuint, SharedPtr<ITextureObject>> m_textures;
@@ -199,3 +280,5 @@ private:
 using VertexAttributeVersion = VersionType;
 
 } // namespace MobileGL::MG_State::GLState
+
+#pragma pop_macro("GLState")

@@ -118,6 +118,9 @@ void set_hardware() {
 }
 
 void init_gl_state() {
+    // Initialize CPU+GPU symbiotic context
+    // CPU-side: GLStateManager (via GLState alias)
+    // GPU-side: BackendObject (set later via InitWindowSurface/InitPbufferSurface)
     GLState.Initialize();
     GLState.proxyWidth = 0;
     GLState.proxyHeight = 0;

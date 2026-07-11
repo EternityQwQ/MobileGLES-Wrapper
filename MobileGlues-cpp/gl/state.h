@@ -37,6 +37,90 @@
 #include <cstdint>
 
 // ============================================================================
+// FastGLIdMap: flat-array ID mapping for O(1) lookup without hashing
+//
+// Replaces UnorderedMap<GLuint, GLuint> for forward ID mappings where keys
+// are small sequential GL object IDs. Gives direct array access instead of
+// hash computation + bucket traversal. Falls back to unordered_map for
+// large IDs.
+// ============================================================================
+
+namespace {
+
+static constexpr size_t kFastIdMapFlatSize = 65536;
+
+template<typename FallbackMap = UnorderedMap<GLuint, GLuint>>
+class FastGLIdMap {
+public:
+    GLuint lookup(GLuint key) const {
+        if (__builtin_expect(key < kFastIdMapFlatSize, 1)) {
+            return (__builtin_expect(key < m_flat.size(), 1)) ? m_flat[key] : 0;
+        }
+        auto it = m_overflow.find(key);
+        return (it != m_overflow.end()) ? it->second : 0;
+    }
+
+    void insert(GLuint key, GLuint value) {
+        if (__builtin_expect(key < kFastIdMapFlatSize, 1)) {
+            if (__builtin_expect(key >= m_flat.size(), 0)) {
+                m_flat.resize(key + 1, 0);
+            }
+            m_flat[key] = value;
+        } else {
+            m_overflow[key] = value;
+        }
+    }
+
+    void erase(GLuint key) {
+        if (__builtin_expect(key < kFastIdMapFlatSize, 1)) {
+            if (__builtin_expect(key < m_flat.size(), 1)) {
+                m_flat[key] = 0;
+            }
+        } else {
+            m_overflow.erase(key);
+        }
+    }
+
+    GLuint& operator[](GLuint key) {
+        if (__builtin_expect(key < kFastIdMapFlatSize, 1)) {
+            if (__builtin_expect(key >= m_flat.size(), 0)) {
+                m_flat.resize(key + 1, 0);
+            }
+            return m_flat[key];
+        }
+        return m_overflow[key];
+    }
+
+    void clear() {
+        m_flat.clear();
+        m_overflow.clear();
+    }
+
+    void reserve(size_t n) {
+        if (n <= kFastIdMapFlatSize) {
+            m_flat.reserve(n);
+        }
+        // overflow map doesn't need explicit reserve
+    }
+
+    bool contains(GLuint key) const {
+        return lookup(key) != 0;
+    }
+
+    size_t size() const {
+        size_t count = 0;
+        for (auto v : m_flat) { if (v) ++count; }
+        return count + m_overflow.size();
+    }
+
+private:
+    std::vector<GLuint> m_flat;
+    FallbackMap m_overflow;
+};
+
+} // anonymous namespace
+
+// ============================================================================
 // Constants
 // ============================================================================
 
@@ -561,12 +645,12 @@ public:
 
     struct BufferState {
         // ID mapping: virtual (desktop GL) → real (GLES)
-        UnorderedMap<GLuint, GLuint> bufferMap;       // virtual → real
+        FastGLIdMap<> bufferMap;          // virtual → real (flat array for fast lookup)
         UnorderedMap<GLuint, GLuint> bufferMapReverse; // real → virtual
         UnorderedMap<GLuint, MGBufferInfo> bufferInfo; // virtual → metadata
 
         // VAO mapping
-        UnorderedMap<GLuint, GLuint> vaoMap;          // virtual → real
+        FastGLIdMap<> vaoMap;             // virtual → real (flat array)
         UnorderedMap<GLuint, GLuint> vaoMapReverse;   // real → virtual
 
         // Current bindings per target
@@ -604,7 +688,7 @@ public:
 
     struct TextureState {
         // ID mapping: virtual → real GLES texture ID
-        UnorderedMap<GLuint, GLuint> textureMap;       // virtual → real
+        FastGLIdMap<> textureMap;          // virtual → real (flat array)
         UnorderedMap<GLuint, GLuint> textureMapReverse; // real → virtual
 
         // Per-unit binding state: unit → target → virtual texture ID
@@ -640,7 +724,7 @@ public:
 
     struct FramebufferState {
         // ID mapping: virtual → real
-        UnorderedMap<GLuint, GLuint> fboMap;          // virtual → real
+        FastGLIdMap<> fboMap;             // virtual → real (flat array)
         UnorderedMap<GLuint, GLuint> fboMapReverse;   // real → virtual
 
         // Current bindings
@@ -680,9 +764,9 @@ public:
 
     struct ShaderState {
         // ID mapping: virtual → real
-        UnorderedMap<GLuint, GLuint> shaderMap;       // virtual → real
-        UnorderedMap<GLuint, GLuint> shaderMapReverse; // real → virtual
-        UnorderedMap<GLuint, GLuint> programMap;       // virtual → real
+        FastGLIdMap<> shaderMap;          // virtual → real (flat array)
+        FastGLIdMap<> programMap;         // virtual → real (flat array)
+        UnorderedMap<GLuint, GLuint> shaderMapReverse;  // real → virtual
         UnorderedMap<GLuint, GLuint> programMapReverse; // real → virtual
 
         // Shader metadata
@@ -823,8 +907,7 @@ public:
     // ========================================================================
 
     GLuint GetRealBuffer(GLuint virtualId) {
-        auto it = buffer.bufferMap.find(virtualId);
-        return (it != buffer.bufferMap.end()) ? it->second : 0;
+        return buffer.bufferMap.lookup(virtualId);
     }
 
     GLuint GetVirtualBuffer(GLuint realId) {
@@ -833,8 +916,7 @@ public:
     }
 
     GLuint GetRealTexture(GLuint virtualId) {
-        auto it = texture.textureMap.find(virtualId);
-        return (it != texture.textureMap.end()) ? it->second : 0;
+        return texture.textureMap.lookup(virtualId);
     }
 
     GLuint GetVirtualTexture(GLuint realId) {
@@ -843,8 +925,7 @@ public:
     }
 
     GLuint GetRealFBO(GLuint virtualId) {
-        auto it = framebuffer.fboMap.find(virtualId);
-        return (it != framebuffer.fboMap.end()) ? it->second : 0;
+        return framebuffer.fboMap.lookup(virtualId);
     }
 
     GLuint GetVirtualFBO(GLuint realId) {
@@ -853,8 +934,7 @@ public:
     }
 
     GLuint GetRealVAO(GLuint virtualId) {
-        auto it = buffer.vaoMap.find(virtualId);
-        return (it != buffer.vaoMap.end()) ? it->second : 0;
+        return buffer.vaoMap.lookup(virtualId);
     }
 
     GLuint GetVirtualVAO(GLuint realId) {
@@ -863,13 +943,11 @@ public:
     }
 
     GLuint GetRealShader(GLuint virtualId) {
-        auto it = shader.shaderMap.find(virtualId);
-        return (it != shader.shaderMap.end()) ? it->second : 0;
+        return shader.shaderMap.lookup(virtualId);
     }
 
     GLuint GetRealProgram(GLuint virtualId) {
-        auto it = shader.programMap.find(virtualId);
-        return (it != shader.programMap.end()) ? it->second : 0;
+        return shader.programMap.lookup(virtualId);
     }
 
     // ========================================================================

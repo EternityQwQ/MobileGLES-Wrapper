@@ -11,6 +11,7 @@
 #pragma once
 
 #include "state.h"
+#include <EGL/egl.h>
 #include "../gles/gles.h"
 #include "glext.h"
 
@@ -113,36 +114,42 @@ inline GLenum map_tex_target(GLenum target) {
 // Utility: get real GLES ID from virtual ID
 // ============================================================================
 
+// ============================================================================
+// Utility: get real GLES ID from virtual ID (inline, direct map access)
+// ============================================================================
+
 inline GLuint getRealBuffer(GLuint virtualId) {
-    return GLState.GetRealBuffer(virtualId);
+    return GLState.buffer.bufferMap.lookup(virtualId);
 }
 
 inline GLuint getVirtualBuffer(GLuint realId) {
-    return GLState.GetVirtualBuffer(realId);
+    auto it = GLState.buffer.bufferMapReverse.find(realId);
+    return (it != GLState.buffer.bufferMapReverse.end()) ? it->second : 0;
 }
 
 inline GLuint getRealTexture(GLuint virtualId) {
-    return GLState.GetRealTexture(virtualId);
+    return GLState.texture.textureMap.lookup(virtualId);
 }
 
 inline GLuint getVirtualTexture(GLuint realId) {
-    return GLState.GetVirtualTexture(realId);
+    auto it = GLState.texture.textureMapReverse.find(realId);
+    return (it != GLState.texture.textureMapReverse.end()) ? it->second : 0;
 }
 
 inline GLuint getRealFBO(GLuint virtualId) {
-    return GLState.GetRealFBO(virtualId);
+    return GLState.framebuffer.fboMap.lookup(virtualId);
 }
 
 inline GLuint getRealVAO(GLuint virtualId) {
-    return GLState.GetRealVAO(virtualId);
+    return GLState.buffer.vaoMap.lookup(virtualId);
 }
 
 inline GLuint getRealProgram(GLuint virtualId) {
-    return GLState.GetRealProgram(virtualId);
+    return GLState.shader.programMap.lookup(virtualId);
 }
 
 inline GLuint getRealShader(GLuint virtualId) {
-    return GLState.GetRealShader(virtualId);
+    return GLState.shader.shaderMap.lookup(virtualId);
 }
 
 // ============================================================================

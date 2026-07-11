@@ -66,12 +66,13 @@ endif()
 
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT MATCHES "AppleClang")
-    add_compile_options(-O3 -ffunction-sections -fdata-sections)
-    add_link_options(-Wl,--gc-sections)
+    add_compile_options(-O3 -ffunction-sections -fdata-sections -flto -fno-math-errno)
+    add_link_options(-Wl,--gc-sections -flto)
 elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
 #    add_compile_options(/O2)
 else ()
-    add_compile_options(-O2)
+    add_compile_options(-O2 -flto)
+    add_link_options(-flto)
 endif()
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
