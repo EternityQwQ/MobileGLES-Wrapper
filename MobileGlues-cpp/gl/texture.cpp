@@ -730,11 +730,6 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
     // reported with Xaero's World Map PBO uploads.
     const GLuint boundUnpackPBO = find_bound_buffer(GL_PIXEL_UNPACK_BUFFER_BINDING);
 
-    // DIAGNOSTIC LOG: trace every entry to identify why swizzle is not triggered.
-    // Compare the format/type/internalFormat Xaero actually passes.
-    LOG_E("SWIZZLE_DIAG: entry internalFormat=0x%X format=0x%X type=0x%X pbo=%u pixels=%p size=%dx%dx%d",
-          internalFormat, format, type, boundUnpackPBO, pixels, width, height, depth);
-
     if (boundUnpackPBO != 0) {
         // First, normalise the format/type to what we actually want to feed
         // GLES: GL_UNSIGNED_INT_8_8_8_8(_REV) become GL_UNSIGNED_BYTE, and
@@ -749,14 +744,10 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
                 needSwizzle = true;
             }
         }
-        LOG_E("SWIZZLE_DIAG: PBO path needSwizzle=%d internalFormat=0x%X format=0x%X type=0x%X",
-              needSwizzle, internalFormat, format, type);
 
         if (!needSwizzle) {
             // No swizzle needed - normalise enums and let GLES read directly
             // from the PBO.
-            LOG_E("SWIZZLE_DIAG: PBO early-return (no swizzle) internalFormat=0x%X format=0x%X type=0x%X",
-                  internalFormat, format, type);
             if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) {
                 type = GL_UNSIGNED_BYTE;
             }
@@ -817,7 +808,6 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
         void* out = malloc(byteCount);
         if (!out) {
             LOG_E("swizzle_pixels_for_unpack: allocation of %zu bytes failed (PBO path)", byteCount)
-            GLES.glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
             if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
             if (format == GL_BGRA) format = GL_RGBA;
             return pixels;
@@ -863,8 +853,6 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
     // through to GLES unchanged (the format enum may still be GL_BGRA, in
     // which case GLES will report an error - matching previous behaviour).
     if (internalFormat != GL_RGBA8 && internalFormat != GL_RGBA) {
-        LOG_E("SWIZZLE_DIAG: non-PBO early-return (not RGBA8) internalFormat=0x%X format=0x%X type=0x%X",
-              internalFormat, format, type);
         return pixels;
     }
 
@@ -875,16 +863,12 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
         // when paired with GL_RGBA, so normalize them to GL_UNSIGNED_BYTE
         // (the byte layout is already RGBA on little-endian for the _REV
         // variant; the non-REV variant would have been swizzled above).
-        LOG_E("SWIZZLE_DIAG: non-PBO early-return (no swizzle needed) format=0x%X type=0x%X",
-              format, type);
         if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) {
             type = GL_UNSIGNED_BYTE;
         }
         if (format == GL_BGRA) format = GL_RGBA;
         return pixels;
     }
-
-    LOG_E("SWIZZLE_DIAG: non-PBO swizzle TRIGGERED format=0x%X type=0x%X", format, type);
 
     // Read the caller's GL_UNPACK_* layout parameters so we can locate the
     // actual source rows correctly. The cache mirrors what glPixelStorei()
@@ -1076,6 +1060,15 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
     if (uploadPixels != pixels && uploadPixels != nullptr) {
         ScopedUnpackTight tightGuard;
         GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, uploadPixels);
+        // CPU swizzle produced correct RGBA data. Force GLES-side texture
+        // swizzle to identity so sampling doesn't re-swap channels (Xaero
+        // sets R=BLUE/B=RED on desktop GL to match its BGRA uploads, which
+        // would double-swap the already-correct RGBA here).
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        tex->bgraCpuSwizzled = true;
     } else {
         GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, uploadPixels);
     }
@@ -1106,21 +1099,6 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
         return;
     }
 
-    // CPU-side BGRA/packed-type swizzle so GLES sees GL_RGBA + GL_UNSIGNED_BYTE.
-    GLuint pboToRestore = 0;
-    const void* uploadPixels = swizzle_pixels_for_unpack((GLenum)internalFormat, format, type, pixels, width, height, depth, &pboToRestore);
-    ScopedPboRestore pboGuard;
-    pboGuard.pboToRestore = pboToRestore;
-
-    if (uploadPixels != pixels && uploadPixels != nullptr) {
-        ScopedUnpackTight tightGuard;
-        GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
-    } else {
-        GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
-    }
-
-    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
-
     GET_TEXTURE_OBJECT(target);
     tex->target = ConvertGLEnumToTextureTarget(target);
     tex->internal_format = internalFormat;
@@ -1132,6 +1110,30 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
     tex->swizzle_param[2] = GL_BLUE;
     tex->swizzle_param[3] = GL_ALPHA;
     if (level == 0) tex->hasMipmaps = false;
+
+    // CPU-side BGRA/packed-type swizzle so GLES sees GL_RGBA + GL_UNSIGNED_BYTE.
+    GLuint pboToRestore = 0;
+    const void* uploadPixels = swizzle_pixels_for_unpack((GLenum)internalFormat, format, type, pixels, width, height, depth, &pboToRestore);
+    ScopedPboRestore pboGuard;
+    pboGuard.pboToRestore = pboToRestore;
+
+    if (uploadPixels != pixels && uploadPixels != nullptr) {
+        ScopedUnpackTight tightGuard;
+        GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
+        // CPU swizzle produced correct RGBA data. Force GLES-side texture
+        // swizzle to identity so sampling doesn't re-swap channels (Xaero
+        // sets R=BLUE/B=RED on desktop GL to match its BGRA uploads, which
+        // would double-swap the already-correct RGBA here).
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        tex->bgraCpuSwizzled = true;
+    } else {
+        GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
+    }
+
+    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
 
     CHECK_GL_ERROR
 }
@@ -1147,12 +1149,10 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
           pixels)
 
     // Look up the bound texture's internal format so the BGRA/packed-type
-    // swizzle is only applied to RGBA8-class textures.
-    GLenum texInternalFormat = GL_RGBA8;
-    {
-        GET_TEXTURE_OBJECT(target);
-        if (tex) texInternalFormat = tex->internal_format;
-    }
+    // swizzle is only applied to RGBA8-class textures. Keep `tex` in scope
+    // so we can set bgraCpuSwizzled after the upload.
+    GET_TEXTURE_OBJECT(target);
+    GLenum texInternalFormat = tex ? tex->internal_format : GL_RGBA8;
 
     // CPU-side BGRA/packed-type swizzle. Replaces the previous code that
     // permanently corrupted the texture's GL_TEXTURE_SWIZZLE_R/B state and
@@ -1165,6 +1165,13 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
     if (uploadPixels != pixels && uploadPixels != nullptr) {
         ScopedUnpackTight tightGuard;
         GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, uploadPixels);
+        // CPU swizzle produced correct RGBA data. Force GLES-side texture
+        // swizzle to identity so sampling doesn't re-swap channels.
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        if (tex) tex->bgraCpuSwizzled = true;
     } else {
         GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, uploadPixels);
     }
@@ -1183,11 +1190,8 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
           glEnumToString(target), level, xoffset, yoffset, zoffset, width, height, depth, glEnumToString(format),
           glEnumToString(type))
 
-    GLenum texInternalFormat = GL_RGBA8;
-    {
-        GET_TEXTURE_OBJECT(target);
-        if (tex) texInternalFormat = tex->internal_format;
-    }
+    GET_TEXTURE_OBJECT(target);
+    GLenum texInternalFormat = tex ? tex->internal_format : GL_RGBA8;
 
     GLuint pboToRestore = 0;
     const void* uploadPixels = swizzle_pixels_for_unpack(texInternalFormat, format, type, pixels, width, height, depth, &pboToRestore);
@@ -1197,6 +1201,13 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
     if (uploadPixels != pixels && uploadPixels != nullptr) {
         ScopedUnpackTight tightGuard;
         GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, uploadPixels);
+        // CPU swizzle produced correct RGBA data. Force GLES-side texture
+        // swizzle to identity so sampling doesn't re-swap channels.
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        if (tex) tex->bgraCpuSwizzled = true;
     } else {
         GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, uploadPixels);
     }
@@ -1523,6 +1534,26 @@ void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
         }
     }
 
+    // Intercept GL_TEXTURE_SWIZZLE_R/G/B/A - see glTexParameteri for rationale.
+    if (pname == GL_TEXTURE_SWIZZLE_R || pname == GL_TEXTURE_SWIZZLE_G ||
+        pname == GL_TEXTURE_SWIZZLE_B || pname == GL_TEXTURE_SWIZZLE_A) {
+        GET_TEXTURE_OBJECT(target);
+        if (tex) {
+            int idx = -1;
+            switch (pname) {
+                case GL_TEXTURE_SWIZZLE_R: idx = 0; break;
+                case GL_TEXTURE_SWIZZLE_G: idx = 1; break;
+                case GL_TEXTURE_SWIZZLE_B: idx = 2; break;
+                case GL_TEXTURE_SWIZZLE_A: idx = 3; break;
+            }
+            if (idx >= 0) {
+                tex->swizzle_param[idx] = (GLint)param;
+                tex->bgraCpuSwizzled = true;
+            }
+        }
+        return;
+    }
+
     GLES.glTexParameterf(target, pname, param);
     CHECK_GL_ERROR
 }
@@ -1567,6 +1598,34 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
         }
     }
 
+    // Intercept GL_TEXTURE_SWIZZLE_R/G/B/A: record the application's requested
+    // swizzle into tex->swizzle_param[] but do NOT forward to GLES.
+    // We do CPU-side BGRA->RGBA byte swizzle during pixel upload, so the GLES
+    // texture already stores correct RGBA data. If we forwarded Xaero's
+    // desktop-GL-style R=BLUE/B=RED swizzle to GLES, GLES would re-swap the
+    // already-correct channels on sampling, producing a blue image.
+    if (pname == GL_TEXTURE_SWIZZLE_R || pname == GL_TEXTURE_SWIZZLE_G ||
+        pname == GL_TEXTURE_SWIZZLE_B || pname == GL_TEXTURE_SWIZZLE_A) {
+        GET_TEXTURE_OBJECT(target);
+        if (tex) {
+            int idx = -1;
+            switch (pname) {
+                case GL_TEXTURE_SWIZZLE_R: idx = 0; break;
+                case GL_TEXTURE_SWIZZLE_G: idx = 1; break;
+                case GL_TEXTURE_SWIZZLE_B: idx = 2; break;
+                case GL_TEXTURE_SWIZZLE_A: idx = 3; break;
+            }
+            if (idx >= 0) {
+                tex->swizzle_param[idx] = param;
+                // Mark that this texture has been CPU-swizzled, so sampling
+                // must use identity swizzle on GLES side.
+                tex->bgraCpuSwizzled = true;
+            }
+        }
+        // Do NOT forward to GLES - GLES swizzle stays at identity.
+        return;
+    }
+
     GLES.glTexParameteri(target, pname, param);
     CHECK_GL_ERROR
 }
@@ -1579,20 +1638,42 @@ void glTexParameteriv(GLenum target, GLenum pname, const GLint* params) {
     if (pname == GL_TEXTURE_SWIZZLE_RGBA) {
         LOG_D("find GL_TEXTURE_SWIZZLE_RGBA, now use glTexParameteri")
         if (params) {
-            // deferred those call to draw call?
-            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, params[0]);
-            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, params[1]);
-            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, params[2]);
-            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, params[3]);
-
-            // save states for now
+            // Save the application's requested swizzle into tex->swizzle_param
+            // but do NOT forward to GLES. CPU-side BGRA->RGBA swizzle has
+            // already been applied during pixel upload, so the GLES texture
+            // stores correct RGBA data. Forwarding Xaero's R=BLUE/B=RED
+            // desktop-GL swizzle to GLES would re-swap the channels on
+            // sampling, producing a blue image.
             GET_TEXTURE_OBJECT(target);
-            tex->swizzle_param[0] = params[0];
-            tex->swizzle_param[1] = params[1];
-            tex->swizzle_param[2] = params[2];
-            tex->swizzle_param[3] = params[3];
+            if (tex) {
+                tex->swizzle_param[0] = params[0];
+                tex->swizzle_param[1] = params[1];
+                tex->swizzle_param[2] = params[2];
+                tex->swizzle_param[3] = params[3];
+                tex->bgraCpuSwizzled = true;
+            }
         } else {
             LOG_E("glTexParameteriv: params is nullptr for GL_TEXTURE_SWIZZLE_RGBA")
+        }
+    } else if (pname == GL_TEXTURE_SWIZZLE_R || pname == GL_TEXTURE_SWIZZLE_G ||
+               pname == GL_TEXTURE_SWIZZLE_B || pname == GL_TEXTURE_SWIZZLE_A) {
+        // Single-channel SWIZZLE via glTexParameteriv: same interception as
+        // glTexParameteri - record but don't forward to GLES.
+        if (params) {
+            GET_TEXTURE_OBJECT(target);
+            if (tex) {
+                int idx = -1;
+                switch (pname) {
+                    case GL_TEXTURE_SWIZZLE_R: idx = 0; break;
+                    case GL_TEXTURE_SWIZZLE_G: idx = 1; break;
+                    case GL_TEXTURE_SWIZZLE_B: idx = 2; break;
+                    case GL_TEXTURE_SWIZZLE_A: idx = 3; break;
+                }
+                if (idx >= 0) {
+                    tex->swizzle_param[idx] = params[0];
+                    tex->bgraCpuSwizzled = true;
+                }
+            }
         }
     } else if (pname == GL_TEXTURE_MIN_FILTER && params) {
         // Same mipmap-filter downgrade as glTexParameteri - see comment there.
@@ -1632,6 +1713,40 @@ void glTexParameteriv(GLenum target, GLenum pname, const GLint* params) {
 void glTexParameterfv(GLenum target, GLenum pname, const GLfloat* params) {
     LOG()
     LOG_D("glTexParameterfv, target: %s, pname: %s", glEnumToString(target), glEnumToString(pname))
+    // Intercept GL_TEXTURE_SWIZZLE_R/G/B/A/RGBA - see glTexParameteri.
+    if (pname == GL_TEXTURE_SWIZZLE_R || pname == GL_TEXTURE_SWIZZLE_G ||
+        pname == GL_TEXTURE_SWIZZLE_B || pname == GL_TEXTURE_SWIZZLE_A) {
+        if (params) {
+            GET_TEXTURE_OBJECT(target);
+            if (tex) {
+                int idx = -1;
+                switch (pname) {
+                    case GL_TEXTURE_SWIZZLE_R: idx = 0; break;
+                    case GL_TEXTURE_SWIZZLE_G: idx = 1; break;
+                    case GL_TEXTURE_SWIZZLE_B: idx = 2; break;
+                    case GL_TEXTURE_SWIZZLE_A: idx = 3; break;
+                }
+                if (idx >= 0) {
+                    tex->swizzle_param[idx] = (GLint)params[0];
+                    tex->bgraCpuSwizzled = true;
+                }
+            }
+        }
+        return;
+    }
+    if (pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        if (params) {
+            GET_TEXTURE_OBJECT(target);
+            if (tex) {
+                tex->swizzle_param[0] = (GLint)params[0];
+                tex->swizzle_param[1] = (GLint)params[1];
+                tex->swizzle_param[2] = (GLint)params[2];
+                tex->swizzle_param[3] = (GLint)params[3];
+                tex->bgraCpuSwizzled = true;
+            }
+        }
+        return;
+    }
     GLES.glTexParameterfv(target, pname, params);
     CHECK_GL_ERROR
 }
