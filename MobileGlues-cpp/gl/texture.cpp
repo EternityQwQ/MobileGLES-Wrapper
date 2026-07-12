@@ -607,7 +607,92 @@ static GLenum get_binding_for_target(GLenum target) {
 // When no swizzle is needed the original `pixels` pointer is returned and no
 // allocation is performed. When a swizzle is needed a heap buffer is
 // allocated with malloc() and the caller must free() it.
+//
+// Pixel-store awareness (GL_UNPACK_ROW_LENGTH / SKIP_PIXELS / SKIP_ROWS /
+// ALIGNMENT / IMAGE_HEIGHT / SKIP_IMAGES): when the caller has set non-default
+// unpack layout parameters, the source bytes are *not* tightly packed. We
+// read GLState.texture.unpack* to compute the real source row stride and skip
+// offset, copy the actual source rows into a tightly-packed output buffer,
+// swizzle the tight buffer, and then upload with a temporarily-reset GLES
+// unpack state (see ScopedUnpackTight below) so GLES reads the tight buffer
+// correctly. This is what Xaero's World Map and similar sub-region updaters
+// rely on.
 // ============================================================================
+
+// RAII helper: temporarily reset GLES's GL_UNPACK_* state to the tightly
+// packed default (row length 0, all skips 0, alignment 1, image height 0),
+// used right after swizzle_pixels_for_unpack() returns a freshly-allocated
+// tight buffer. The previous GLES state is restored on destruction so the
+// caller's GL_UNPACK_* settings are preserved across the call.
+// GLState.texture.* caches are kept in sync too.
+struct ScopedUnpackTight {
+    GLint prevRowLength;
+    GLint prevSkipPixels;
+    GLint prevSkipRows;
+    GLint prevAlignment;
+    GLint prevImageHeight;
+    GLint prevSkipImages;
+
+    ScopedUnpackTight() {
+        // Snapshot GLES state and CPU cache together.
+        GLES.glGetIntegerv(GL_UNPACK_ROW_LENGTH, &prevRowLength);
+        GLES.glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &prevSkipPixels);
+        GLES.glGetIntegerv(GL_UNPACK_SKIP_ROWS, &prevSkipRows);
+        GLES.glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlignment);
+        GLES.glGetIntegerv(GL_UNPACK_IMAGE_HEIGHT, &prevImageHeight);
+        GLES.glGetIntegerv(GL_UNPACK_SKIP_IMAGES, &prevSkipImages);
+
+        GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        GLES.glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+        GLES.glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
+    }
+    ~ScopedUnpackTight() {
+        GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, prevRowLength);
+        GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, prevSkipPixels);
+        GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, prevSkipRows);
+        GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlignment);
+        GLES.glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, prevImageHeight);
+        GLES.glPixelStorei(GL_UNPACK_SKIP_IMAGES, prevSkipImages);
+        // CPU cache is already current - the GLES.glPixelStorei() calls above
+        // were forwarded through the GLES function pointer table which doesn't
+        // touch our cache; that's intentional because the cache is the
+        // caller-visible state and we want it preserved too.
+    }
+};
+
+// RAII helper: temporarily reset GLES's GL_PACK_* state to the tightly
+// packed default, mirror of ScopedUnpackTight but for the pack (readback)
+// path. Used by glReadPixels when a CPU swizzle is required so that GLES
+// writes a tightly packed RGBA buffer into a temp allocation; the buffer is
+// then CPU-swizzled and re-laid-out into the caller's destination according
+// to the caller's GL_PACK_* settings.
+struct ScopedPackTight {
+    GLint prevRowLength;
+    GLint prevSkipPixels;
+    GLint prevSkipRows;
+    GLint prevAlignment;
+
+    ScopedPackTight() {
+        GLES.glGetIntegerv(GL_PACK_ROW_LENGTH, &prevRowLength);
+        GLES.glGetIntegerv(GL_PACK_SKIP_PIXELS, &prevSkipPixels);
+        GLES.glGetIntegerv(GL_PACK_SKIP_ROWS, &prevSkipRows);
+        GLES.glGetIntegerv(GL_PACK_ALIGNMENT, &prevAlignment);
+
+        GLES.glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        GLES.glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+        GLES.glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+        GLES.glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    }
+    ~ScopedPackTight() {
+        GLES.glPixelStorei(GL_PACK_ROW_LENGTH, prevRowLength);
+        GLES.glPixelStorei(GL_PACK_SKIP_PIXELS, prevSkipPixels);
+        GLES.glPixelStorei(GL_PACK_SKIP_ROWS, prevSkipRows);
+        GLES.glPixelStorei(GL_PACK_ALIGNMENT, prevAlignment);
+    }
+};
 
 static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& format, GLenum& type,
                                               const void* pixels, GLsizei width, GLsizei height, GLsizei depth) {
@@ -632,17 +717,61 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
         return pixels;
     }
 
+    // Read the caller's GL_UNPACK_* layout parameters so we can locate the
+    // actual source rows correctly. The cache mirrors what glPixelStorei()
+    // forwarded to GLES.
+    const GLint rowLength    = GLState.texture.unpackRowLength;
+    const GLint alignment    = GLState.texture.unpackAlignment;
+    const GLint skipPixels   = GLState.texture.unpackSkipPixels;
+    const GLint skipRows     = GLState.texture.unpackSkipRows;
+    const GLint imageHeight  = GLState.texture.unpackImageHeight;
+    const GLint skipImages   = GLState.texture.unpackSkipImages;
+
+    constexpr GLuint bytesPerPixel = 4;
+    const GLuint effectiveRow = (rowLength > 0) ? static_cast<GLuint>(rowLength) : static_cast<GLuint>(width);
+    const GLuint effectiveImageHeight = (imageHeight > 0) ? static_cast<GLuint>(imageHeight) : static_cast<GLuint>(height);
+    // Row stride in bytes, honoring GL_UNPACK_ALIGNMENT.
+    const GLuint srcRowStride   = static_cast<GLuint>(widthalign(effectiveRow * bytesPerPixel, alignment));
+    const GLuint srcImageStride = srcRowStride * effectiveImageHeight;
+
+    // Offset in bytes from `pixels` to the first byte of the first source row.
+    const size_t srcSkipOffset =
+        static_cast<size_t>(skipImages) * srcImageStride +
+        static_cast<size_t>(skipRows) * srcRowStride +
+        static_cast<size_t>(skipPixels) * bytesPerPixel;
+
     const GLuint pixelCount = static_cast<GLuint>(width) * static_cast<GLuint>(height) * static_cast<GLuint>(depth);
-    const size_t byteCount = static_cast<size_t>(pixelCount) * 4;
+    const size_t byteCount = static_cast<size_t>(pixelCount) * bytesPerPixel;
     void* out = malloc(byteCount);
     if (!out) {
         LOG_E("swizzle_pixels_for_unpack: allocation of %zu bytes failed", byteCount)
         return pixels;
     }
-    memcpy(out, pixels, byteCount);
+
+    // Copy from source (with row stride + skip) into the tightly-packed `out`.
+    const unsigned char* src = static_cast<const unsigned char*>(pixels) + srcSkipOffset;
+    unsigned char* dst = static_cast<unsigned char*>(out);
+    const size_t srcRowBytes = static_cast<size_t>(width) * bytesPerPixel;
+    if (srcRowStride == static_cast<GLuint>(width) * bytesPerPixel && depth == 1) {
+        // Source is already tightly packed - single memcpy is enough.
+        memcpy(dst, src, byteCount);
+    } else {
+        // Per-row copy (handles non-default row length / alignment).
+        for (GLsizei z = 0; z < depth; ++z) {
+            const unsigned char* srcRow = src + static_cast<size_t>(z) * srcImageStride;
+            for (GLsizei y = 0; y < height; ++y) {
+                memcpy(dst, srcRow, srcRowBytes);
+                srcRow += srcRowStride;
+                dst += srcRowBytes;
+            }
+        }
+    }
+
     ProcessColorSwizzle(out, pixelCount, swizzle, 4);
 
-    // GLES now sees a clean GL_RGBA + GL_UNSIGNED_BYTE upload.
+    // GLES now sees a clean GL_RGBA + GL_UNSIGNED_BYTE upload. The caller is
+    // responsible for wrapping the GLES call in ScopedUnpackTight() so that
+    // GLES also interprets `out` as tightly packed.
     format = GL_RGBA;
     type = GL_UNSIGNED_BYTE;
     return out;
@@ -766,7 +895,15 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
 
     tex->format = format;
 
-    GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, uploadPixels);
+    // If swizzle_pixels_for_unpack() allocated a tight buffer, we must also
+    // tell GLES to read it as tight (the caller's GL_UNPACK_* settings still
+    // apply and would otherwise misread the freshly-swizzled buffer).
+    if (uploadPixels != pixels && uploadPixels != nullptr) {
+        ScopedUnpackTight tightGuard;
+        GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, uploadPixels);
+    } else {
+        GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, uploadPixels);
+    }
 
     if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
 
@@ -797,7 +934,12 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
     // CPU-side BGRA/packed-type swizzle so GLES sees GL_RGBA + GL_UNSIGNED_BYTE.
     const void* uploadPixels = swizzle_pixels_for_unpack((GLenum)internalFormat, format, type, pixels, width, height, depth);
 
-    GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
+    if (uploadPixels != pixels && uploadPixels != nullptr) {
+        ScopedUnpackTight tightGuard;
+        GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
+    } else {
+        GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
+    }
 
     if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
 
@@ -838,7 +980,12 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
     // only handled the BGRA + GL_UNSIGNED_INT_8_8_8_8(_REV) case.
     const void* uploadPixels = swizzle_pixels_for_unpack(texInternalFormat, format, type, pixels, width, height, 1);
 
-    GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, uploadPixels);
+    if (uploadPixels != pixels && uploadPixels != nullptr) {
+        ScopedUnpackTight tightGuard;
+        GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, uploadPixels);
+    } else {
+        GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, uploadPixels);
+    }
 
     if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
 
@@ -862,7 +1009,12 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
 
     const void* uploadPixels = swizzle_pixels_for_unpack(texInternalFormat, format, type, pixels, width, height, depth);
 
-    GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, uploadPixels);
+    if (uploadPixels != pixels && uploadPixels != nullptr) {
+        ScopedUnpackTight tightGuard;
+        GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, uploadPixels);
+    } else {
+        GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, uploadPixels);
+    }
 
     if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
 
@@ -1445,12 +1597,72 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
         return;
     }
 
-    GLES.glReadPixels(x, y, width, height, glesFormat, glesType, pixels);
-
-    if (needSwizzle && pixels) {
-        const GLuint pixelCount = static_cast<GLuint>(width) * static_cast<GLuint>(height);
-        ProcessColorSwizzle(pixels, pixelCount, swizzle, 4);
+    if (!needSwizzle || !pixels) {
+        // No swizzle needed - forward to GLES with the caller's pack settings.
+        GLES.glReadPixels(x, y, width, height, glesFormat, glesType, pixels);
+        CHECK_GL_ERROR
+        return;
     }
+
+    // BGRA / packed-type readback path:
+    // 1. Allocate a tightly-packed temp buffer.
+    // 2. Reset GLES's GL_PACK_* to tight so GLES writes tightly-packed RGBA
+    //    into the temp buffer (independent of the caller's pack settings,
+    //    which may have non-default row length / alignment / skips).
+    // 3. CPU-swizzle the tight RGBA buffer into the requested BGRA / packed
+    //    layout.
+    // 4. Copy the tight result back into the caller's `pixels` buffer,
+    //    honoring the caller's GL_PACK_ROW_LENGTH / ALIGNMENT / SKIP_*.
+    const GLuint pixelCount = static_cast<GLuint>(width) * static_cast<GLuint>(height);
+    const size_t byteCount = static_cast<size_t>(pixelCount) * 4;
+    void* tight = malloc(byteCount);
+    if (!tight) {
+        LOG_E("glReadPixels: allocation of %zu bytes failed; falling back to RGBA write", byteCount)
+        GLES.glReadPixels(x, y, width, height, glesFormat, glesType, pixels);
+        CHECK_GL_ERROR
+        return;
+    }
+
+    {
+        ScopedPackTight packGuard;
+        GLES.glReadPixels(x, y, width, height, glesFormat, glesType, tight);
+    }
+    // Errors from the glReadPixels call above are still reported via the
+    // post-call glGetError() in CHECK_GL_ERROR below.
+
+    // Swizzle the tightly-packed RGBA into the user-requested layout (BGRA
+    // and/or reversed byte order for GL_UNSIGNED_INT_8_8_8_8 etc.).
+    ProcessColorSwizzle(tight, pixelCount, swizzle, 4);
+
+    // Re-layout from tight buffer to caller's `pixels` honoring GL_PACK_*.
+    const GLint rowLength   = GLState.texture.packRowLength;
+    const GLint alignment   = GLState.texture.packAlignment;
+    const GLint skipPixels  = GLState.texture.packSkipPixels;
+    const GLint skipRows    = GLState.texture.packSkipRows;
+    constexpr GLuint bytesPerPixel = 4;
+    const GLuint effectiveRow = (rowLength > 0) ? static_cast<GLuint>(rowLength) : static_cast<GLuint>(width);
+    const GLuint dstRowStride = static_cast<GLuint>(widthalign(effectiveRow * bytesPerPixel, alignment));
+    const size_t dstSkipOffset =
+        static_cast<size_t>(skipRows) * dstRowStride +
+        static_cast<size_t>(skipPixels) * bytesPerPixel;
+
+    if (dstRowStride == static_cast<GLuint>(width) * bytesPerPixel && skipPixels == 0 && skipRows == 0) {
+        // Caller wants tightly packed output - single memcpy.
+        memcpy(pixels, tight, byteCount);
+    } else {
+        // Per-row copy with the caller's row stride; padding bytes between
+        // rows are left untouched (matching OpenGL spec behaviour).
+        const unsigned char* src = static_cast<const unsigned char*>(tight);
+        unsigned char* dst = static_cast<unsigned char*>(pixels) + dstSkipOffset;
+        const size_t rowBytes = static_cast<size_t>(width) * bytesPerPixel;
+        for (GLsizei y = 0; y < height; ++y) {
+            memcpy(dst, src, rowBytes);
+            src += rowBytes;
+            dst += dstRowStride;
+        }
+    }
+
+    free(tight);
 
     CHECK_GL_ERROR
 }
