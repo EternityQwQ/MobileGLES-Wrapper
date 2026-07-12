@@ -39,10 +39,12 @@
 
 #include "../gles/gles.h"
 #include "../gles/loader.h"
+#include "buffer.h"
 #include "drawing.h"
 #include "framebuffer.h"
 #include "log.h"
 #include "mg.h"
+#include "pixel.h"
 #include <GL/gl.h>
 
 #define DEBUG 0
@@ -324,7 +326,12 @@ static constexpr size_t kRedTypeMappingCount = sizeof(kRedTypeMappings) / sizeof
 // with early return for maximum performance on the hot path.
 // ============================================================================
 void internal_convert(GLenum* internal_format, GLenum* type, GLenum* format) {
-    if (format && *format == GL_BGRA) *format = GL_RGBA;
+    // NOTE: GL_BGRA is intentionally NOT rewritten to GL_RGBA here.
+    // GLES 3.2 rejects GL_BGRA, so callers that hand pixel data to GLES
+    // (glTexImage2D / glTexSubImage2D / glTexSubImage3D / glReadPixels /
+    // glGetTexImage) must run the CPU-side swizzle from
+    // pixel.h (get_rgba8_unpack_swizzle / get_rgba_pack_swizzle) and only
+    // then flip the format enum to GL_RGBA before invoking GLES.
 
     // Fast path: most common formats first
     switch (*internal_format) {
@@ -332,7 +339,10 @@ void internal_convert(GLenum* internal_format, GLenum* type, GLenum* format) {
     case GL_RGBA8:
     case GL_RGBA:
         if (type) *type = GL_UNSIGNED_BYTE;
-        if (format) *format = GL_RGBA;
+        // Preserve GL_BGRA if the caller explicitly requested it; the caller
+        // is responsible for running the CPU swizzle and flipping the enum
+        // to GL_RGBA before invoking GLES.
+        if (format && *format != GL_BGRA) *format = GL_RGBA;
         return;
     case GL_RGBA16F:
         if (type) *type = GL_HALF_FLOAT;
@@ -585,6 +595,59 @@ static GLenum get_binding_for_target(GLenum target) {
     auto& __bindingSlot = __currentUnit.GetBindingSlot(targetR);                                                       \
     auto tex = __bindingSlot.GetBoundObject()
 
+// ============================================================================
+// BGRA / packed-type CPU swizzle helpers for the upload (unpack) path.
+//
+// GLES 3.2 only accepts GL_RGBA + GL_UNSIGNED_BYTE for the RGBA8 upload
+// case, but desktop GL callers frequently pass GL_BGRA and / or packed types
+// such as GL_UNSIGNED_INT_8_8_8_8(_REV). swizzle_pixels_for_unpack() takes
+// the user-supplied (format, type, pixels) triple and returns a pointer that
+// is safe to feed straight to GLES as (GL_RGBA, GL_UNSIGNED_BYTE).
+//
+// When no swizzle is needed the original `pixels` pointer is returned and no
+// allocation is performed. When a swizzle is needed a heap buffer is
+// allocated with malloc() and the caller must free() it.
+// ============================================================================
+
+static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& format, GLenum& type,
+                                              const void* pixels, GLsizei width, GLsizei height, GLsizei depth) {
+    if (!pixels) return nullptr;
+
+    // Only handle the RGBA8 family for now; other internal formats are passed
+    // through to GLES unchanged (the format enum may still be GL_BGRA, in
+    // which case GLES will report an error - matching previous behaviour).
+    if (internalFormat != GL_RGBA8 && internalFormat != GL_RGBA) return pixels;
+
+    unsigned char swizzle[4];
+    if (!get_rgba8_unpack_swizzle(format, type, swizzle)) {
+        // No swizzle needed. Make sure the format/type pair is GLES-friendly:
+        // GL_UNSIGNED_INT_8_8_8_8(_REV) are also unsupported by GLES even
+        // when paired with GL_RGBA, so normalize them to GL_UNSIGNED_BYTE
+        // (the byte layout is already RGBA on little-endian for the _REV
+        // variant; the non-REV variant would have been swizzled above).
+        if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) {
+            type = GL_UNSIGNED_BYTE;
+        }
+        if (format == GL_BGRA) format = GL_RGBA;
+        return pixels;
+    }
+
+    const GLuint pixelCount = static_cast<GLuint>(width) * static_cast<GLuint>(height) * static_cast<GLuint>(depth);
+    const size_t byteCount = static_cast<size_t>(pixelCount) * 4;
+    void* out = malloc(byteCount);
+    if (!out) {
+        LOG_E("swizzle_pixels_for_unpack: allocation of %zu bytes failed", byteCount)
+        return pixels;
+    }
+    memcpy(out, pixels, byteCount);
+    ProcessColorSwizzle(out, pixelCount, swizzle, 4);
+
+    // GLES now sees a clean GL_RGBA + GL_UNSIGNED_BYTE upload.
+    format = GL_RGBA;
+    type = GL_UNSIGNED_BYTE;
+    return out;
+}
+
 void glBindTexture(GLenum target, GLuint texture) {
     LOG()
     LOG_D("glBindTexture(%s, %d)", glEnumToString(target), texture)
@@ -662,7 +725,6 @@ void glActiveTexture(GLenum texture) {
 void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const GLvoid* pixels) {
     LOG()
-    GLenum transfer_format = format;
 
     LOG_D("mg_glTexImage2D,target: %s,level: %d,internalFormat: %s->%s,width: "
           "%d,height: %d,border: %d,format: %s,type: %s, pixels: 0x%x",
@@ -697,37 +759,16 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
     tex->swizzle_param[2] = GL_BLUE;
     tex->swizzle_param[3] = GL_ALPHA;
 
-    if (transfer_format == GL_BGRA && tex->format != transfer_format && internalFormat == GL_RGBA8 && width <= 128 &&
-        height <= 128) { // xaero has 64x64 tiles...hack here
-        LOG_D("Detected GL_BGRA format @ tex = %d, do swizzle", tex->texture)
-        if (tex->swizzle_param[0] == 0) { // assert this as never called glTexParameteri(...,
-                                          // GL_TEXTURE_SWIZZLE_R, ...)
-            tex->swizzle_param[0] = GL_RED;
-            tex->swizzle_param[1] = GL_GREEN;
-            tex->swizzle_param[2] = GL_BLUE;
-            tex->swizzle_param[3] = GL_ALPHA;
-        }
-
-        GLint r = tex->swizzle_param[0];
-        GLint g = tex->swizzle_param[1];
-        GLint b = tex->swizzle_param[2];
-        GLint a = tex->swizzle_param[3];
-        tex->swizzle_param[0] = g;
-        tex->swizzle_param[1] = b;
-        tex->swizzle_param[2] = a;
-        tex->swizzle_param[3] = r;
-        tex->format = transfer_format;
-
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, tex->swizzle_param[0]);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, tex->swizzle_param[1]);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, tex->swizzle_param[2]);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, tex->swizzle_param[3]);
-        CHECK_GL_ERROR
-    }
+    // CPU-side BGRA/packed-type swizzle so GLES sees GL_RGBA + GL_UNSIGNED_BYTE.
+    // This replaces the previous ≤128x128 GLES-texture-swizzle hack that
+    // corrupted the texture's swizzle state and only worked for tiny textures.
+    const void* uploadPixels = swizzle_pixels_for_unpack((GLenum)internalFormat, format, type, pixels, width, height, 1);
 
     tex->format = format;
 
-    GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, pixels);
+    GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, uploadPixels);
+
+    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
 
     CHECK_GL_ERROR
 }
@@ -753,7 +794,12 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
         return;
     }
 
-    GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, pixels);
+    // CPU-side BGRA/packed-type swizzle so GLES sees GL_RGBA + GL_UNSIGNED_BYTE.
+    const void* uploadPixels = swizzle_pixels_for_unpack((GLenum)internalFormat, format, type, pixels, width, height, depth);
+
+    GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
+
+    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
 
     GET_TEXTURE_OBJECT(target);
     tex->target = ConvertGLEnumToTextureTarget(target);
@@ -779,15 +825,22 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
           glEnumToString(target), level, xoffset, yoffset, width, height, glEnumToString(format), glEnumToString(type),
           pixels)
 
-    if (format == GL_BGRA && (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV)) {
-        glTexParameteri(target, GL_TEXTURE_SWIZZLE_R,  GL_BLUE);
-        glTexParameteri(target, GL_TEXTURE_SWIZZLE_B,  GL_RED);
-
-        format = GL_RGBA;
-        type = GL_UNSIGNED_BYTE;
+    // Look up the bound texture's internal format so the BGRA/packed-type
+    // swizzle is only applied to RGBA8-class textures.
+    GLenum texInternalFormat = GL_RGBA8;
+    {
+        GET_TEXTURE_OBJECT(target);
+        if (tex) texInternalFormat = tex->internal_format;
     }
 
-    GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
+    // CPU-side BGRA/packed-type swizzle. Replaces the previous code that
+    // permanently corrupted the texture's GL_TEXTURE_SWIZZLE_R/B state and
+    // only handled the BGRA + GL_UNSIGNED_INT_8_8_8_8(_REV) case.
+    const void* uploadPixels = swizzle_pixels_for_unpack(texInternalFormat, format, type, pixels, width, height, 1);
+
+    GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, uploadPixels);
+
+    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
 
     CHECK_GL_ERROR
 }
@@ -801,7 +854,18 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
           glEnumToString(target), level, xoffset, yoffset, zoffset, width, height, depth, glEnumToString(format),
           glEnumToString(type))
 
-    GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
+    GLenum texInternalFormat = GL_RGBA8;
+    {
+        GET_TEXTURE_OBJECT(target);
+        if (tex) texInternalFormat = tex->internal_format;
+    }
+
+    const void* uploadPixels = swizzle_pixels_for_unpack(texInternalFormat, format, type, pixels, width, height, depth);
+
+    GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, uploadPixels);
+
+    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
+
     CHECK_GL_ERROR
 }
 
@@ -1348,30 +1412,46 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
           "type=0x%x, pixels=0x%x",
           x, y, width, height, format, type, pixels)
 
-    static int count = 0;
-    GLenum prevFormat = format;
+    // GLES 3.2 cannot emit GL_BGRA / GL_UNSIGNED_INT_8_8_8_8 / GL_UNSIGNED_INT_8_8_8_8_REV
+    // directly. Always read back as GL_RGBA + GL_UNSIGNED_BYTE and apply a
+    // CPU-side swizzle afterwards so the in-memory bytes match what the caller
+    // asked for. This mirrors the pack path of MobileGL-DirectGLES's
+    // PixelStoreProcessor.
+    unsigned char swizzle[4];
+    const bool needSwizzle = get_rgba_pack_swizzle(format, type, swizzle);
 
-    if (format == GL_BGRA && type == GL_UNSIGNED_INT_8_8_8_8) {
-        format = GL_RGBA;
-        type = GL_UNSIGNED_BYTE;
+    GLenum glesFormat = format;
+    GLenum glesType = type;
+    if (needSwizzle) {
+        glesFormat = GL_RGBA;
+        glesType = GL_UNSIGNED_BYTE;
     }
+
     LOG_D("glReadPixels converted, x=%d, y=%d, width=%d, height=%d, format=0x%x, "
-          "type=0x%x, pixels=0x%x",
-          x, y, width, height, format, type, pixels)
-    GLES.glReadPixels(x, y, width, height, format, type, pixels);
+          "type=0x%x, pixels=0x%x, needSwizzle=%d",
+          x, y, width, height, glesFormat, glesType, pixels, (int)needSwizzle)
 
-#if GLOBAL_DEBUG || DEBUG
-    if (prevFormat == GL_BGRA && type == GL_UNSIGNED_BYTE) {
-        std::vector<uint8_t> px(width * height * sizeof(uint8_t) * 4, 0);
-        GLES.glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-        GLES.glReadPixels(x, y, width, height, format, type, px.data());
-
-        std::fstream fs(std::string(concatenate(mg_directory_path, "/readpixels/")) + std::to_string(count++) + ".bin",
-                        std::ios::out | std::ios::binary | std::ios::trunc);
-        fs.write((const char*)px.data(), px.size());
-        fs.close();
+    // PBO path: `pixels` is a byte offset into the bound GL_PIXEL_PACK_BUFFER
+    // and an in-place CPU swizzle is not possible. Fall back to the legacy
+    // behaviour (write RGBA bytes - layout differs from what the caller asked
+    // for, but at least the read itself succeeds).
+    const GLuint boundPBO = find_bound_buffer(GL_PIXEL_PACK_BUFFER_BINDING);
+    if (needSwizzle && boundPBO != 0) {
+        LOG_W("glReadPixels: BGRA swizzle requested with a PBO bound; "
+              "data will be RGBA instead of %s/%s",
+              glEnumToString(format), glEnumToString(type))
+        GLES.glReadPixels(x, y, width, height, glesFormat, glesType, pixels);
+        CHECK_GL_ERROR
+        return;
     }
-#endif
+
+    GLES.glReadPixels(x, y, width, height, glesFormat, glesType, pixels);
+
+    if (needSwizzle && pixels) {
+        const GLuint pixelCount = static_cast<GLuint>(width) * static_cast<GLuint>(height);
+        ProcessColorSwizzle(pixels, pixelCount, swizzle, 4);
+    }
+
     CHECK_GL_ERROR
 }
 
