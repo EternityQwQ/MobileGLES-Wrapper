@@ -22,11 +22,12 @@ extern "C"
 
     const char* glEnumToString(GLenum e);
 
-    // Log file stubs (used by LOG_* macros)
-    static inline void write_log(const char* fmt, ...) { (void)fmt; }
-    static inline void write_log_n(const char* fmt, ...) { (void)fmt; }
-    static inline void clear_log() {}
-    static inline void start_log() {}
+    // Log file functions (used by LOG_* macros). Implemented in log.cpp;
+    // they write to log_file_path (e.g. /sdcard/MG/latest.log).
+    void write_log(const char* fmt, ...);
+    void write_log_n(const char* fmt, ...);
+    void clear_log();
+    void start_log();
 
 #ifdef __cplusplus
 }
