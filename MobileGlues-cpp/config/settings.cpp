@@ -37,8 +37,10 @@ void init_settings() {
         success ? static_cast<AngleDepthClearFixMode>(config_get_int("angleDepthClearFixMode"))
                 : AngleDepthClearFixMode::Disabled;
     int customGLVersionInt = success ? config_get_int("customGLVersion") : DEFAULT_GL_VERSION;
-    FSR1_Quality_Preset fsr1Setting =
-        success ? static_cast<FSR1_Quality_Preset>(config_get_int("fsr1Setting")) : FSR1_Quality_Preset::Disabled;
+    // fsr1Setting always disabled
+    // FSR1_Quality_Preset fsr1Setting =
+    //     success ? static_cast<FSR1_Quality_Preset>(config_get_int("fsr1Setting")) : FSR1_Quality_Preset::Disabled;
+    FSR1_Quality_Preset fsr1Setting = FSR1_Quality_Preset::Disabled;
     HideMGEnvLevel hideMGEnvLevel =
         success ? static_cast<HideMGEnvLevel>(config_get_int("hideMGEnvLevel")) : HideMGEnvLevel::Disabled;
 
