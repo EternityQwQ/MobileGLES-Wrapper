@@ -1058,6 +1058,10 @@ static std::string postprocess_essl(std::string essl, GLenum shader_type, uint e
 
 static std::once_flag glslang_init_flag;
 
+void init_glslang_once() {
+    std::call_once(glslang_init_flag, [] { glslang::InitializeProcess(); });
+}
+
 std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_version, int& return_code) {
     bool atomicCounterEmulated = false;
 
@@ -1066,7 +1070,7 @@ std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_ve
 
     int glsl_version = get_or_add_glsl_version(corrected);
 
-    std::call_once(glslang_init_flag, [] { glslang::InitializeProcess(); });
+    init_glslang_once();
 
     const char* src[] = {corrected.c_str()};
     int errc = 0;

@@ -39,4 +39,10 @@ std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_ve
 // Extract #version from GLSL source (e.g. "#version 330 core" → 330, not found → -1)
 int getGLSLVersion(const char* glsl_code);
 
+// Pre-initialize glslang (builds its built-in symbol tables). Idempotent and
+// thread-safe via std::call_once. Calling this at startup moves the one-time
+// glslang init cost out of the first glShaderSource path, avoiding the
+// combined "init + full compile" CPU spike on the first rendered frame.
+void init_glslang_once();
+
 #endif

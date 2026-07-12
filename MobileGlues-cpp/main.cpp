@@ -11,6 +11,7 @@
 #include "egl/loader.h"
 #include "gl/envvars.h"
 #include "gl/gl.h"
+#include "gl/glsl/glsl_for_es.h"
 #include "gl/log.h"
 #include "gl/mg.h"
 #include "gles/loader.h"
@@ -64,6 +65,11 @@ void proc_init() {
     set_multidraw_setting();
 
     init_settings_post();
+
+    // Pre-initialize glslang so the one-time symbol-table build does not land
+    // on the first glShaderSource call (which would stack with the first
+    // shader compile and cause a noticeable CPU spike on the first frame).
+    init_glslang_once();
 
 #if PROFILING
     init_perfetto();

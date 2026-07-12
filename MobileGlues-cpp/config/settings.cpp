@@ -46,9 +46,18 @@ void init_settings() {
         customGLVersionInt = 0;
     }
 
-    size_t maxGlslCacheSize = 0;
-    if (config_get_int("maxGlslCacheSize") > 0) {
-        maxGlslCacheSize = success ? config_get_int("maxGlslCacheSize") * 1024 * 1024 : 0;
+    // Default GLSL cache size: 64 MB. The on-disk cache eliminates repeated
+    // GLSL->ESSL compilation (the dominant cause of sudden CPU spikes) once
+    // warm. Override via the "maxGlslCacheSize" config key (in MB); set it to
+    // 0 to disable the cache entirely.
+    size_t maxGlslCacheSize = 64 * 1024 * 1024;
+    if (success) {
+        int configured = config_get_int("maxGlslCacheSize");
+        if (configured > 0) {
+            maxGlslCacheSize = static_cast<size_t>(configured) * 1024 * 1024;
+        } else if (configured == 0) {
+            maxGlslCacheSize = 0;
+        }
     }
 
     // if (static_cast<int>(angleConfig) < 0 || static_cast<int>(angleConfig) > 3) {
@@ -99,7 +108,9 @@ void init_settings() {
         enableExtComputeShader = true; // always enabled
         enableExtTimerQuery = true;
         enableExtDirectStateAccess = true;
-        maxGlslCacheSize = 0;
+        // Note: maxGlslCacheSize is intentionally NOT forced to 0 here. Keeping
+        // the shader cache enabled is essential to avoid repeated GLSL->ESSL
+        // compilation, which is the primary cause of sudden CPU load spikes.
         angleDepthClearFixMode = AngleDepthClearFixMode::Disabled;
         fsr1Setting = FSR1_Quality_Preset::Disabled;
         hideMGEnvLevel = HideMGEnvLevel::Disabled;
