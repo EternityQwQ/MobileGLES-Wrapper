@@ -142,17 +142,33 @@ extern "C" GLAPI GLAPIENTRY void glFramebufferRenderbuffer(GLenum target, GLenum
 extern "C" GLAPI GLAPIENTRY GLenum glCheckFramebufferStatus(GLenum target) {
     LOG()
     GLenum status = GLES.glCheckFramebufferStatus(target);
-    // Ignore incomplete errors for applications that don't fully set up FBOs
-    // or use incompatible configurations (e.g. MRT with unsupported formats).
-    // Desktop GL shaders (like ComplementaryUnbound) may use FBO configurations
-    // that are not directly supported by GLES drivers.
+    // GLES drivers occasionally report GL_FRAMEBUFFER_UNSUPPORTED for FBO
+    // configurations that are legitimate on desktop GL (e.g. depth-stencil
+    // texture attachments with specific sized internalformats). Desktop GL
+    // shaders (like ComplementaryUnbound) rely on these configurations, and
+    // the desktop driver typically allows them in practice. Promote
+    // UNSUPPORTED → COMPLETE so callers continue rendering instead of
+    // aborting on a configuration that the desktop driver would have accepted.
+    //
+    // Other incomplete statuses (INCOMPLETE_ATTACHMENT,
+    // INCOMPLETE_MISSING_ATTACHMENT, INCOMPLETE_DIMENSIONS,
+    // INCOMPLETE_MULTISAMPLE, UNDEFINED) indicate *real* configuration bugs
+    // (missing attachment, size mismatch, etc.) that would cause rendering
+    // into the FBO to silently fail in GLES. Returning the real status lets
+    // applications see the problem and fall back to a working path instead of
+    // rendering into a broken FBO (which manifests as a black screen, e.g.
+    // when Xaero's World Map allocates its region FBO with a configuration
+    // GLES actually rejects).
     switch (status) {
         case GL_FRAMEBUFFER_COMPLETE:
             break;
-        default:
-            // Treat all non-complete statuses as complete to prevent crashes
-            LOG_D("glCheckFramebufferStatus: ignoring status 0x%X, returning COMPLETE", status);
+        case GL_FRAMEBUFFER_UNSUPPORTED:
+            LOG_D("glCheckFramebufferStatus: promoting UNSUPPORTED -> COMPLETE (target=0x%X)", target);
             status = GL_FRAMEBUFFER_COMPLETE;
+            break;
+        default:
+            LOG_E("glCheckFramebufferStatus: target=0x%X reports 0x%X (incomplete); returning real status",
+                  target, status);
             break;
     }
     return status;
