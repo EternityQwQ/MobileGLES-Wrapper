@@ -36,6 +36,88 @@ static std::vector<size_t> g_buffer_datasize;
 static std::vector<GLuint> g_element_array_buffer_per_vao;
 
 // ============================================================================
+// PBO CPU shadow data (for BGRA->RGBA swizzle without glMapBufferRange read)
+// ============================================================================
+// Maps wrapper PBO id -> CPU shadow buffer. Only GL_PIXEL_UNPACK_BUFFERs get
+// a shadow. See pbo_shadow_* API in buffer.h.
+#include <unordered_map>
+#include <mutex>
+struct PboShadow {
+    std::vector<unsigned char> data;
+    // Active write mapping state (offset/length of the mapped region).
+    GLintptr mapOffset = 0;
+    GLsizeiptr mapLength = 0;
+    bool mapped = false;
+};
+static std::unordered_map<GLuint, PboShadow> g_pbo_shadows;
+static std::mutex g_pbo_shadow_mutex;
+
+void pbo_shadow_alloc(GLuint pbo, GLsizeiptr size, const void* data) {
+    if (pbo == 0) return;
+    std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
+    auto& s = g_pbo_shadows[pbo];
+    s.data.resize(size);
+    s.mapped = false;
+    if (data && size > 0) {
+        memcpy(s.data.data(), data, size);
+    }
+}
+
+void pbo_shadow_subdata(GLuint pbo, GLintptr offset, GLsizeiptr size, const void* data) {
+    if (pbo == 0 || !data || size <= 0) return;
+    std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
+    auto it = g_pbo_shadows.find(pbo);
+    if (it == g_pbo_shadows.end()) return;
+    auto& s = it->second;
+    if (offset < 0) offset = 0;
+    if (offset + size > (GLsizeiptr)s.data.size()) {
+        // Grow to fit (matches glBufferSubData's grow-on-overflow semantics
+        // on some drivers; GLES would error, but we mirror shadow first).
+        s.data.resize(offset + size);
+    }
+    memcpy(s.data.data() + offset, data, size);
+}
+
+void pbo_shadow_delete(GLuint pbo) {
+    if (pbo == 0) return;
+    std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
+    g_pbo_shadows.erase(pbo);
+}
+
+const unsigned char* pbo_shadow_get(GLuint pbo) {
+    if (pbo == 0) return nullptr;
+    std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
+    auto it = g_pbo_shadows.find(pbo);
+    if (it == g_pbo_shadows.end()) return nullptr;
+    return it->second.data.data();
+}
+
+void* pbo_shadow_map_write(GLuint pbo, GLintptr offset, GLsizeiptr length) {
+    if (pbo == 0 || length <= 0) return nullptr;
+    std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
+    auto it = g_pbo_shadows.find(pbo);
+    if (it == g_pbo_shadows.end()) return nullptr;
+    auto& s = it->second;
+    if (offset < 0) offset = 0;
+    if (offset + length > (GLsizeiptr)s.data.size()) {
+        s.data.resize(offset + length);
+    }
+    s.mapOffset = offset;
+    s.mapLength = length;
+    s.mapped = true;
+    return s.data.data() + offset;
+}
+
+void pbo_shadow_unmap(GLuint pbo) {
+    if (pbo == 0) return;
+    std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
+    auto it = g_pbo_shadows.find(pbo);
+    if (it == g_pbo_shadows.end()) return;
+    auto& s = it->second;
+    s.mapped = false;
+}
+
+// ============================================================================
 // Buffer Binding Index Tracking
 // ============================================================================
 
@@ -320,6 +402,8 @@ void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
             GLES.glDeleteBuffers(1, &real_buff);
             CHECK_GL_ERROR
         }
+        // Clean up any PBO shadow data for this buffer.
+        pbo_shadow_delete(buffers[i]);
         remove_buffer(buffers[i]);
     }
 }
@@ -374,7 +458,13 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
           glEnumToString(usage))
     GLES.glBufferData(target, size, data, usage);
     int idx = binding_target_to_index(target);
-    if (idx >= 0) set_buffer_data_size(g_bound_buffers_arr[idx], size);
+    if (idx >= 0) {
+        set_buffer_data_size(g_bound_buffers_arr[idx], size);
+        // Sync PBO shadow for GL_PIXEL_UNPACK_BUFFER.
+        if (target == GL_PIXEL_UNPACK_BUFFER) {
+            pbo_shadow_alloc(g_bound_buffers_arr[idx], size, data);
+        }
+    }
     CHECK_GL_ERROR
 }
 
@@ -382,6 +472,11 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void
     LOG()
     LOG_D("glBufferSubData, target = %s, offset = %d, size = %d, data = %p", glEnumToString(target), offset, size, data)
     GLES.glBufferSubData(target, offset, size, data);
+    // Sync PBO shadow for GL_PIXEL_UNPACK_BUFFER.
+    if (target == GL_PIXEL_UNPACK_BUFFER) {
+        int idx = binding_target_to_index(target);
+        if (idx >= 0) pbo_shadow_subdata(g_bound_buffers_arr[idx], offset, size, data);
+    }
     CHECK_GL_ERROR
 }
 
@@ -414,12 +509,69 @@ void* glMapBuffer(GLenum target, GLenum access) {
 void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
     LOG()
     if (global_settings.buffer_coherent_as_flush) access &= ~GL_MAP_FLUSH_EXPLICIT_BIT;
+    // For write mappings of GL_PIXEL_UNPACK_BUFFER, return a pointer into the
+    // CPU shadow buffer so that subsequent glTexSubImage2D can swizzle the
+    // data directly from CPU memory. The actual GLES buffer is still mapped
+    // and the shadow will be synced to GLES on glUnmapBuffer.
+    if (target == GL_PIXEL_UNPACK_BUFFER && (access & GL_MAP_WRITE_BIT)) {
+        int idx = binding_target_to_index(target);
+        if (idx >= 0) {
+            GLuint pbo = g_bound_buffers_arr[idx];
+            if (pbo != 0) {
+                // Ensure shadow exists - glMapBufferRange can be called before
+                // glBufferData on some drivers, so lazily allocate.
+                if (!pbo_shadow_get(pbo)) {
+                    pbo_shadow_alloc(pbo, offset + length, nullptr);
+                }
+                void* shadowPtr = pbo_shadow_map_write(pbo, offset, length);
+                if (shadowPtr) {
+                    // Still map GLES buffer for write so the data lands in
+                    // the real buffer too (for non-texture reads of PBO).
+                    // Use GL_MAP_WRITE_BIT only (no INVALIDATE since we
+                    // preserve shadow). Actually, we don't need GLES mapping
+                    // at all if we sync via glBufferSubData on unmap.
+                    return shadowPtr;
+                }
+            }
+        }
+    }
     return GLES.glMapBufferRange(target, offset, length, access);
 }
 
 GLboolean glUnmapBuffer(GLenum target) {
     LOG()
     LOG_D("%s(%s)", __func__, glEnumToString(target));
+    // For PBO write mappings, we returned a pointer into the CPU shadow.
+    // Now sync the shadow data to the actual GLES buffer via glBufferSubData
+    // (which is always supported, unlike glMapBufferRange(GL_MAP_READ_BIT)).
+    if (target == GL_PIXEL_UNPACK_BUFFER) {
+        int idx = binding_target_to_index(target);
+        if (idx >= 0) {
+            GLuint pbo = g_bound_buffers_arr[idx];
+            if (pbo != 0) {
+                // Find the shadow and flush the mapped region to GLES.
+                const unsigned char* shadowData = pbo_shadow_get(pbo);
+                // Check if this PBO has a write mapping active.
+                // We need to peek at the mapped state - pbo_shadow_unmap
+                // returns void, so we check by attempting to get the data
+                // and looking at whether a mapping was active.
+                // Simplest: just call pbo_shadow_unmap which marks unmapped.
+                if (shadowData) {
+                    // Use glBufferSubData to sync the mapped region to GLES.
+                    // We need the offset/length - retrieve via a helper.
+                    // For simplicity, flush the entire shadow.
+                    // Get the size from g_buffer_datasize.
+                    size_t sz = get_buffer_data_size(pbo);
+                    if (sz > 0) {
+                        GLES.glBufferSubData(target, 0, (GLsizeiptr)sz, shadowData);
+                    }
+                }
+                pbo_shadow_unmap(pbo);
+                CHECK_GL_ERROR
+                return GL_TRUE;
+            }
+        }
+    }
     if (g_gles_caps.GL_OES_mapbuffer) return GLES.glUnmapBuffer(target);
 
     GLboolean result = GLES.glUnmapBuffer(target);

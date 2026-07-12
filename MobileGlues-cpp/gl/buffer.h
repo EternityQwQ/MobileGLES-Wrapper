@@ -36,6 +36,23 @@ extern "C"
 
     void set_bound_buffer_by_target(GLenum target, GLuint buffer);
 
+    // --- PBO CPU shadow data (for BGRA swizzle without glMapBufferRange read) ---
+    // MobileGL-DirectGLES keeps a CPU shadow copy of every PBO; we adopt the
+    // same design but only for GL_PIXEL_UNPACK_BUFFER. This lets us do CPU-side
+    // BGRA->RGBA swizzle in glTexSubImage2D/glTexImage2D without mapping the
+    // source PBO for reading (which fails on many GLES drivers).
+    void pbo_shadow_alloc(GLuint pbo, GLsizeiptr size, const void* data);
+    void pbo_shadow_subdata(GLuint pbo, GLintptr offset, GLsizeiptr size, const void* data);
+    void pbo_shadow_delete(GLuint pbo);
+    // Returns a pointer to the PBO's CPU shadow data, or nullptr if none.
+    // The pointer is valid until the next PBO operation on this buffer.
+    const unsigned char* pbo_shadow_get(GLuint pbo);
+    // For glMapBufferRange(GL_MAP_WRITE_BIT): returns a writable CPU pointer
+    // into the shadow buffer at `offset`. Caller must call pbo_shadow_unmap
+    // to flush the shadow back to GLES.
+    void* pbo_shadow_map_write(GLuint pbo, GLintptr offset, GLsizeiptr length);
+    void pbo_shadow_unmap(GLuint pbo);
+
     GLuint find_bound_ssbo_indexed(GLuint index);
 
     GLuint gen_array();
