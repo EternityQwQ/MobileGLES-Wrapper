@@ -765,6 +765,15 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
         }
 
         // Map the PBO for reading.
+        // Strategy: Direct glMapBufferRange(GL_MAP_READ_BIT) on the source PBO
+        // can fail on some GLES drivers when the PBO was created/written via
+        // glBufferData/glBufferSubData with write-only usage flags. To get a
+        // reliable readback we copy the source PBO into a freshly-allocated
+        // scratch buffer (via glCopyBufferSubData) and then map THAT buffer
+        // for reading - a scratch buffer freshly created with glBufferData(NULL)
+        // + glMapBufferRange(GL_MAP_READ_BIT) is always mappable on GLES 3.2.
+        // This is the same reason MobileGL-DirectGLES keeps a CPU shadow copy
+        // of every PBO rather than mapping the source for reading.
         GLint pboSize = 0;
         GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &pboSize);
         if (pboSize <= 0) {
@@ -774,10 +783,36 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
             if (format == GL_BGRA) format = GL_RGBA;
             return pixels;
         }
-        void* mappedPBO = GLES.glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, (GLsizeiptr)pboSize, GL_MAP_READ_BIT);
+
+        // Allocate a scratch PBO and copy the source PBO data into it.
+        GLuint scratchPBO = 0;
+        GLES.glGenBuffers(1, &scratchPBO);
+        if (scratchPBO == 0) {
+            LOG_E("swizzle_pixels_for_unpack: glGenBuffers failed, falling back")
+            if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
+            if (format == GL_BGRA) format = GL_RGBA;
+            return pixels;
+        }
+        // Bind scratch to GL_COPY_WRITE_BUFFER (a safe auxiliary target that
+        // doesn't disturb the currently-bound PIXEL_UNPACK_BUFFER).
+        GLES.glBindBuffer(GL_COPY_WRITE_BUFFER, scratchPBO);
+        GLES.glBufferData(GL_COPY_WRITE_BUFFER, pboSize, nullptr, GL_STATIC_READ);
+        // glCopyBufferSubData reads from GL_COPY_READ_BUFFER, so we must also
+        // rebind the source PBO there (GL_PIXEL_UNPACK_BUFFER still holds it).
+        GLES.glBindBuffer(GL_COPY_READ_BUFFER, boundUnpackPBO);
+        GLES.glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, pboSize);
+        // Unbind the read binding so we don't leave dangling state.
+        GLES.glBindBuffer(GL_COPY_READ_BUFFER, 0);
+
+        // Now map the scratch buffer for reading - this always works because
+        // we just allocated it with GL_STATIC_READ usage and it has no prior
+        // mappings or pending writes.
+        void* mappedPBO = GLES.glMapBufferRange(GL_COPY_WRITE_BUFFER, 0, (GLsizeiptr)pboSize, GL_MAP_READ_BIT);
         if (!mappedPBO) {
-            LOG_E("swizzle_pixels_for_unpack: glMapBufferRange(GL_MAP_READ_BIT) failed on PBO %u, "
+            LOG_E("swizzle_pixels_for_unpack: glMapBufferRange(GL_MAP_READ_BIT) failed on scratch PBO %u, "
                   "falling back to non-swizzled upload", boundUnpackPBO)
+            GLES.glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+            GLES.glDeleteBuffers(1, &scratchPBO);
             if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
             if (format == GL_BGRA) format = GL_RGBA;
             return pixels;
@@ -833,9 +868,11 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
             }
         }
 
-        // Unmap before we (or the caller) make any GLES texture calls - GLES
-        // forbids most operations on a still-mapped buffer.
-        GLES.glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+        // Unmap the scratch buffer before we (or the caller) make any GLES
+        // texture calls - GLES forbids most operations on a still-mapped buffer.
+        GLES.glUnmapBuffer(GL_COPY_WRITE_BUFFER);
+        GLES.glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+        GLES.glDeleteBuffers(1, &scratchPBO);
 
         // Run the swizzle on the tight buffer.
         ProcessColorSwizzle(out, pixelCount, swizzle, 4);
