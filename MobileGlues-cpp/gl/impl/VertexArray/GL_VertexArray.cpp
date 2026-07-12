@@ -20,10 +20,7 @@ using namespace MobileGL::MG_State::GLState;
 namespace MobileGL::impl::GLImpl {
 
 void BindVertexArray(GLuint array) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
-
-    auto vao = glCtx.GetVertexArray(array);
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetCurrentVertexArray(array);
 
     CallAndCheckGLES(g_GLESFuncs.glBindVertexArray(array));

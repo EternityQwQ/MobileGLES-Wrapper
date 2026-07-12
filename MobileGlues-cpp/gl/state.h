@@ -137,18 +137,35 @@ constexpr int MAX_TRANSFORM_FEEDBACK_BUFFERS = 4;
 // ============================================================================
 // Logging
 // ============================================================================
+// Debug/info logging is gated on MG_DEBUG (off by default) to avoid the
+// per-call printf/__android_log_print overhead on the hot path: every
+// CallAndCheckGLES() invocation emits an MG_LOG_DEBUG trace. Warnings and
+// errors remain unconditional since they are rare and indicate real issues.
+#ifndef MG_DEBUG
+#define MG_DEBUG 0
+#endif
 
 #ifdef __ANDROID__
 #define MG_LOG(level, fmt, ...) __android_log_print(level, "MobileGlues", fmt, ##__VA_ARGS__)
-#define MG_LOG_DEBUG(fmt, ...) MG_LOG(ANDROID_LOG_DEBUG, fmt, ##__VA_ARGS__)
-#define MG_LOG_INFO(fmt, ...) MG_LOG(ANDROID_LOG_INFO, fmt, ##__VA_ARGS__)
 #define MG_LOG_WARN(fmt, ...) MG_LOG(ANDROID_LOG_WARN, fmt, ##__VA_ARGS__)
 #define MG_LOG_ERROR(fmt, ...) MG_LOG(ANDROID_LOG_ERROR, fmt, ##__VA_ARGS__)
+#if MG_DEBUG
+#define MG_LOG_DEBUG(fmt, ...) MG_LOG(ANDROID_LOG_DEBUG, fmt, ##__VA_ARGS__)
+#define MG_LOG_INFO(fmt, ...) MG_LOG(ANDROID_LOG_INFO, fmt, ##__VA_ARGS__)
 #else
-#define MG_LOG_DEBUG(fmt, ...) printf("[DEBUG] " fmt "\n", ##__VA_ARGS__)
-#define MG_LOG_INFO(fmt, ...) printf("[INFO] " fmt "\n", ##__VA_ARGS__)
+#define MG_LOG_DEBUG(fmt, ...) ((void)0)
+#define MG_LOG_INFO(fmt, ...) ((void)0)
+#endif
+#else
 #define MG_LOG_WARN(fmt, ...) printf("[WARN] " fmt "\n", ##__VA_ARGS__)
 #define MG_LOG_ERROR(fmt, ...) printf("[ERROR] " fmt "\n", ##__VA_ARGS__)
+#if MG_DEBUG
+#define MG_LOG_DEBUG(fmt, ...) printf("[DEBUG] " fmt "\n", ##__VA_ARGS__)
+#define MG_LOG_INFO(fmt, ...) printf("[INFO] " fmt "\n", ##__VA_ARGS__)
+#else
+#define MG_LOG_DEBUG(fmt, ...) ((void)0)
+#define MG_LOG_INFO(fmt, ...) ((void)0)
+#endif
 #endif
 
 // ============================================================================

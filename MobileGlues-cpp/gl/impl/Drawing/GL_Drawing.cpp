@@ -65,9 +65,6 @@ static void SyncTexturesForDraw() {
 void DrawArrays(GLenum mode, GLint first, GLsizei count) {
     if (count <= 0) return;
 
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
-
     SyncAllStateForDraw();
 
     CallAndCheckGLES(g_GLESFuncs.glDrawArrays(mode, first, count));
@@ -76,7 +73,6 @@ void DrawArrays(GLenum mode, GLint first, GLsizei count) {
 void DrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     if (count <= 0) return;
 
-    auto& glCtx = GLContext::Get();
     SyncAllStateForDraw();
 
     CallAndCheckGLES(g_GLESFuncs.glDrawElements(mode, count, type, indices));
@@ -200,7 +196,6 @@ void DrawArraysIndirect(GLenum mode, const void* indirect) {
 }
 
 void Clear(GLbitfield mask) {
-    auto& glCtx = GLContext::Get();
     // Sync framebuffer state before clear
     SyncAllStateForDraw();
     CallAndCheckGLES(g_GLESFuncs.glClear(mask));

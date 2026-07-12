@@ -19,22 +19,19 @@ using namespace MobileGL::MG_State::GLState;
 namespace MobileGL::impl::GLImpl {
 
 void Enable(GLenum cap) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetCapability(cap, true);
     CallAndCheckGLES(g_GLESFuncs.glEnable(cap));
 }
 
 void Disable(GLenum cap) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetCapability(cap, false);
     CallAndCheckGLES(g_GLESFuncs.glDisable(cap));
 }
 
 GLboolean IsEnabled(GLenum cap) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     return stateMgr.GetCapability(cap) ? GL_TRUE : GL_FALSE;
 }
 
@@ -51,8 +48,7 @@ GLboolean IsEnabledi(GLenum cap, GLuint index) {
 }
 
 void Viewport(GLint x, GLint y, GLsizei width, GLsizei height) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetViewport(x, y, width, height);
     CallAndCheckGLES(g_GLESFuncs.glViewport(x, y, width, height));
 }
@@ -62,22 +58,19 @@ void DepthRange(GLclampd nearVal, GLclampd farVal) {
 }
 
 void DepthRangef(GLfloat nearVal, GLfloat farVal) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetDepthRange(nearVal, farVal);
     CallAndCheckGLES(g_GLESFuncs.glDepthRangef(nearVal, farVal));
 }
 
 void Scissor(GLint x, GLint y, GLsizei width, GLsizei height) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetScissor(x, y, width, height);
     CallAndCheckGLES(g_GLESFuncs.glScissor(x, y, width, height));
 }
 
 void ClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetClearColor(red, green, blue, alpha);
     CallAndCheckGLES(g_GLESFuncs.glClearColor(red, green, blue, alpha));
 }

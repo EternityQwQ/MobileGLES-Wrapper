@@ -42,22 +42,16 @@ void BindBuffer(GLenum target, GLuint buffer) {
     auto& stateMgr = glCtx.GetStateManager();
 
     auto buf = glCtx.GetBuffer(buffer);
-    if (target == GL_ELEMENT_ARRAY_BUFFER) {
-        stateMgr.SetElementArrayBuffer(buffer);
-    } else if (target == GL_ARRAY_BUFFER) {
-        stateMgr.SetArrayBuffer(buffer);
-    } else if (target == GL_UNIFORM_BUFFER) {
-        stateMgr.SetUniformBuffer(buffer);
-    } else if (target == GL_COPY_READ_BUFFER) {
-        stateMgr.SetCopyReadBuffer(buffer);
-    } else if (target == GL_COPY_WRITE_BUFFER) {
-        stateMgr.SetCopyWriteBuffer(buffer);
-    } else if (target == GL_PIXEL_PACK_BUFFER) {
-        stateMgr.SetPixelPackBuffer(buffer);
-    } else if (target == GL_PIXEL_UNPACK_BUFFER) {
-        stateMgr.SetPixelUnpackBuffer(buffer);
-    } else if (target == GL_TRANSFORM_FEEDBACK_BUFFER) {
-        stateMgr.SetTransformFeedbackBuffer(buffer);
+    switch (target) {
+        case GL_ELEMENT_ARRAY_BUFFER:      stateMgr.SetElementArrayBuffer(buffer); break;
+        case GL_ARRAY_BUFFER:              stateMgr.SetArrayBuffer(buffer); break;
+        case GL_UNIFORM_BUFFER:            stateMgr.SetUniformBuffer(buffer); break;
+        case GL_COPY_READ_BUFFER:          stateMgr.SetCopyReadBuffer(buffer); break;
+        case GL_COPY_WRITE_BUFFER:         stateMgr.SetCopyWriteBuffer(buffer); break;
+        case GL_PIXEL_PACK_BUFFER:         stateMgr.SetPixelPackBuffer(buffer); break;
+        case GL_PIXEL_UNPACK_BUFFER:       stateMgr.SetPixelUnpackBuffer(buffer); break;
+        case GL_TRANSFORM_FEEDBACK_BUFFER: stateMgr.SetTransformFeedbackBuffer(buffer); break;
+        default: break;
     }
 
     if (buf) {
@@ -169,20 +163,14 @@ void FlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
 }
 
 void BindBufferBase(GLenum target, GLuint index, GLuint buffer) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
-
-    auto buf = glCtx.GetBuffer(buffer);
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetIndexedBufferBinding(target, index, buffer);
 
     CallAndCheckGLES(g_GLESFuncs.glBindBufferBase(target, index, buffer));
 }
 
 void BindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
-
-    auto buf = glCtx.GetBuffer(buffer);
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetIndexedBufferBinding(target, index, buffer);
 
     CallAndCheckGLES(g_GLESFuncs.glBindBufferRange(target, index, buffer, offset, size));

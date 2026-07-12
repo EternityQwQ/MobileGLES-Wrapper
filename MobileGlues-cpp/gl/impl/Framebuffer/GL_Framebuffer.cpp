@@ -95,8 +95,6 @@ void ReadBuffer(GLenum src) {
 }
 
 void BindRenderbuffer(GLenum target, GLuint renderbuffer) {
-    auto& glCtx = GLContext::Get();
-    auto rbo = glCtx.GetRenderbuffer(renderbuffer);
     CallAndCheckGLES(g_GLESFuncs.glBindRenderbuffer(target, renderbuffer));
 }
 

@@ -91,10 +91,7 @@ void LinkProgram(GLuint program) {
 }
 
 void UseProgram(GLuint program) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
-
-    auto prog = glCtx.GetProgram(program);
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetCurrentProgram(program);
 
     CallAndCheckGLES(g_GLESFuncs.glUseProgram(program));

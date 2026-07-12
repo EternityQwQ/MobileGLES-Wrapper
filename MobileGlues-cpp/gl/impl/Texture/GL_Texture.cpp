@@ -20,8 +20,7 @@ using namespace MobileGL::MG_State::GLState;
 namespace MobileGL::impl::GLImpl {
 
 void ActiveTexture(GLenum texture) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.SetActiveTextureUnit(texture - GL_TEXTURE0);
     CallAndCheckGLES(g_GLESFuncs.glActiveTexture(texture));
 }
@@ -57,8 +56,7 @@ GLboolean IsTexture(GLuint texture) {
 
 void TexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
                 GLint border, GLenum format, GLenum type, const void* pixels) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
 
     TextureTarget texTarget = static_cast<TextureTarget>(target);
     Uint activeUnit = stateMgr.GetActiveTextureUnit();
@@ -154,15 +152,13 @@ void GenerateMipmap(GLenum target) {
 }
 
 void PixelStorei(GLenum pname, GLint param) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.GetTextureState().SetPixelStore(pname, param);
     CallAndCheckGLES(g_GLESFuncs.glPixelStorei(pname, param));
 }
 
 void PixelStoref(GLenum pname, GLfloat param) {
-    auto& glCtx = GLContext::Get();
-    auto& stateMgr = glCtx.GetStateManager();
+    auto& stateMgr = GLContext::Get().GetStateManager();
     stateMgr.GetTextureState().SetPixelStore(pname, static_cast<GLint>(param));
     CallAndCheckGLES(g_GLESFuncs.glPixelStorei(pname, static_cast<GLint>(param)));
 }
