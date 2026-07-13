@@ -47,6 +47,8 @@ extern "C"
     // Returns a pointer to the PBO's CPU shadow data, or nullptr if none.
     // The pointer is valid until the next PBO operation on this buffer.
     const unsigned char* pbo_shadow_get(GLuint pbo);
+    // Returns the size of the PBO's CPU shadow data, or 0 if none.
+    GLsizeiptr pbo_shadow_size(GLuint pbo);
     // For glMapBufferRange(GL_MAP_WRITE_BIT): returns a writable CPU pointer
     // into the shadow buffer at `offset`. Caller must call pbo_shadow_unmap
     // to flush the shadow back to GLES.

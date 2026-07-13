@@ -755,6 +755,19 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
             return pixels;
         }
 
+        // RAII guard for staging buffer (glCopyBufferSubData fallback path).
+        struct StagingGuard {
+            GLuint buffer = 0;
+            GLint prevBinding = 0;
+            bool mapped = false;
+            ~StagingGuard() {
+                if (!buffer) return;
+                if (mapped) GLES.glUnmapBuffer(GL_COPY_WRITE_BUFFER);
+                GLES.glBindBuffer(GL_COPY_WRITE_BUFFER, prevBinding);
+                GLES.glDeleteBuffers(1, &buffer);
+            }
+        } stagingGuard;
+
         // Map the PBO for reading.
         // Strategy: Use the CPU shadow copy maintained by buffer.cpp for
         // GL_PIXEL_UNPACK_BUFFER. This avoids glMapBufferRange(GL_MAP_READ_BIT)
@@ -763,8 +776,35 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
         // glMapBufferRange(write)+glUnmapBuffer in buffer.cpp.
         // This mirrors MobileGL-DirectGLES's CPU shadow architecture.
         const unsigned char* shadowData = pbo_shadow_get(boundUnpackPBO);
+
+        // Fallback: if no shadow exists, use glCopyBufferSubData to copy the
+        // PBO data into a staging buffer, then map the staging buffer for
+        // reading. This works because the staging buffer is a fresh GL_STATIC_READ
+        // buffer which drivers typically allow read-mapping even when they
+        // reject read-mapping on GL_STREAM_DRAW PBOs.
         if (!shadowData) {
-            LOG_E("swizzle_pixels_for_unpack: no CPU shadow for PBO %u, falling back",
+            GLint pboSize2 = 0;
+            GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &pboSize2);
+            if (pboSize2 > 0) {
+                GLES.glGetIntegerv(GL_COPY_WRITE_BUFFER_BINDING, &stagingGuard.prevBinding);
+                GLES.glGenBuffers(1, &stagingGuard.buffer);
+                GLES.glBindBuffer(GL_COPY_WRITE_BUFFER, stagingGuard.buffer);
+                GLES.glBufferData(GL_COPY_WRITE_BUFFER, pboSize2, nullptr, GL_STATIC_READ);
+                GLES.glCopyBufferSubData(GL_PIXEL_UNPACK_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, pboSize2);
+                const unsigned char* mapped = (const unsigned char*)GLES.glMapBufferRange(
+                    GL_COPY_WRITE_BUFFER, 0, pboSize2, GL_MAP_READ_BIT);
+                if (mapped) {
+                    stagingGuard.mapped = true;
+                    shadowData = mapped;
+                } else {
+                    // Mapping failed - guard will unbind and delete the buffer.
+                    stagingGuard.mapped = false;
+                }
+            }
+        }
+
+        if (!shadowData) {
+            LOG_E("swizzle_pixels_for_unpack: no CPU shadow for PBO %u and glCopyBufferSubData fallback failed",
                   boundUnpackPBO)
             if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
             if (format == GL_BGRA) format = GL_RGBA;
@@ -830,7 +870,18 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
         }
 
         // Run the swizzle on the tight buffer.
+        // Diagnostic: log first pixel before/after swizzle to verify correctness.
+        if (pixelCount > 0) {
+            LOG_E("PBO_SWIZZLE: pbo=%u fmt=0x%X type=0x%X swizzle={%d,%d,%d,%d} before=[%02X %02X %02X %02X]",
+                  boundUnpackPBO, format, type, swizzle[0], swizzle[1], swizzle[2], swizzle[3],
+                  src[0], src[1], src[2], src[3]);
+        }
         ProcessColorSwizzle(out, pixelCount, swizzle, 4);
+        if (pixelCount > 0) {
+            unsigned char* p = static_cast<unsigned char*>(out);
+            LOG_E("PBO_SWIZZLE: after swizzle first pixel=[%02X %02X %02X %02X]",
+                  p[0], p[1], p[2], p[3]);
+        }
 
         // Temporarily unbind the PBO so GLES reads from `out` (a real CPU
         // pointer) instead of treating it as a byte offset into the PBO.
@@ -920,7 +971,18 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
         }
     }
 
+    // Diagnostic: log first pixel before/after swizzle for non-PBO path.
+    if (pixelCount > 0) {
+        LOG_E("CPU_SWIZZLE: fmt=0x%X type=0x%X swizzle={%d,%d,%d,%d} before=[%02X %02X %02X %02X]",
+              format, type, swizzle[0], swizzle[1], swizzle[2], swizzle[3],
+              src[0], src[1], src[2], src[3]);
+    }
     ProcessColorSwizzle(out, pixelCount, swizzle, 4);
+    if (pixelCount > 0) {
+        unsigned char* p = static_cast<unsigned char*>(out);
+        LOG_E("CPU_SWIZZLE: after swizzle first pixel=[%02X %02X %02X %02X]",
+              p[0], p[1], p[2], p[3]);
+    }
 
     // GLES now sees a clean GL_RGBA + GL_UNSIGNED_BYTE upload. The caller is
     // responsible for wrapping the GLES call in ScopedUnpackTight() so that

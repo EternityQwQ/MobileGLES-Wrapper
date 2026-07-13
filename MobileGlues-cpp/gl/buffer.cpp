@@ -92,6 +92,14 @@ const unsigned char* pbo_shadow_get(GLuint pbo) {
     return it->second.data.data();
 }
 
+GLsizeiptr pbo_shadow_size(GLuint pbo) {
+    if (pbo == 0) return 0;
+    std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
+    auto it = g_pbo_shadows.find(pbo);
+    if (it == g_pbo_shadows.end()) return 0;
+    return static_cast<GLsizeiptr>(it->second.data.size());
+}
+
 void* pbo_shadow_map_write(GLuint pbo, GLintptr offset, GLsizeiptr length) {
     if (pbo == 0 || length <= 0) return nullptr;
     std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
@@ -557,13 +565,13 @@ GLboolean glUnmapBuffer(GLenum target) {
                 // and looking at whether a mapping was active.
                 // Simplest: just call pbo_shadow_unmap which marks unmapped.
                 if (shadowData) {
-                    // Use glBufferSubData to sync the mapped region to GLES.
-                    // We need the offset/length - retrieve via a helper.
-                    // For simplicity, flush the entire shadow.
-                    // Get the size from g_buffer_datasize.
-                    size_t sz = get_buffer_data_size(pbo);
+                    // Sync the shadow data to the GLES buffer using the
+                    // shadow's actual size (more reliable than
+                    // get_buffer_data_size which may be stale if the PBO
+                    // was initially created via a non-UNPACK target).
+                    GLsizeiptr sz = pbo_shadow_size(pbo);
                     if (sz > 0) {
-                        GLES.glBufferSubData(target, 0, (GLsizeiptr)sz, shadowData);
+                        GLES.glBufferSubData(target, 0, sz, shadowData);
                     }
                 }
                 pbo_shadow_unmap(pbo);
