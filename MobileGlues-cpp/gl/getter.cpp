@@ -16,7 +16,6 @@
 #include <format>
 #include <vector>
 #include <random>
-#include "FSR1/FSR1.h"
 #include "log.h"
 #include "random_string_gen.h"
 
@@ -90,9 +89,17 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         break;
 
     case GL_MAX_TEXTURE_IMAGE_UNITS: {
-        int es_params = 16;
-        GLES.glGetIntegerv(pname, &es_params);
-        CHECK_GL_ERROR(*params) = es_params * 2;
+        // The GLES driver's max texture image units is a static property
+        // of the context and never changes after creation. Cache it to
+        // avoid a GLES round-trip on every query (some mods query this
+        // during per-frame state setup).
+        static GLint cached = -1;
+        if (cached == -1) [[unlikely]] {
+            int es_params = 16;
+            GLES.glGetIntegerv(pname, &es_params);
+            cached = es_params * 2;
+        }
+        (*params) = cached;
         break;
     }
 

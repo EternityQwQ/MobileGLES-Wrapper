@@ -16,6 +16,7 @@
 #include "../gles/loader.h"
 #include "mg.h"
 #include <GLES3/gl32.h>
+#include "buffer.h"
 
 #define DEBUG 0
 
@@ -29,15 +30,27 @@ GLuint g_tracked_tex2d_binding[32] = {0};
 // ============================================================================
 // Atomic counter buffer emulation
 // ============================================================================
+//
+// Hot-path micro-optimization:
+//   syncAtomicCounters() is invoked from every draw/dispatch entry point
+//   (9 sites below). The vast majority of draws do NOT use atomic counters,
+//   so the function must be as cheap as possible on the no-op fast path.
+//
+//   A single cached bool (g_atomicCountersActive) collapses the previous
+//   two-field early-return (binding != 0 && !data.empty()) into one branch.
+//   The flag is updated only when atomic counter state actually changes
+//   (in glMemoryBarrier / glDispatchCompute), never on the draw path.
+//   Result: one predictable branch per draw call instead of two dependent
+//   loads + branches.
+//
+//   __attribute__((always_inline)) guarantees the compiler folds the
+//   fast-path branch directly into the caller's prologue, eliminating
+//   call/return overhead on every draw/dispatch entry point.
 
-// inline: this is called from every draw/dispatch entry point (9 sites below).
-// Inlining lets the compiler fold the two fast-path early-return checks into
-// the caller and avoid a function call on the common no-atomic-counter path.
-static inline void syncAtomicCounters() {
+static inline __attribute__((always_inline)) void syncAtomicCounters() {
+    if (!g_atomicCountersActive) return;
+
     auto &bs = GLState.buffer;
-    if (bs.atomicCounterBufferBinding == 0) return;
-    if (bs.atomicCounterData.empty()) return;
-
     GLuint realBuf = GLState.GetRealBuffer(bs.atomicCounterBufferBinding);
     if (realBuf) {
         GLES.glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, realBuf);
@@ -48,10 +61,10 @@ static inline void syncAtomicCounters() {
     }
 }
 
-static void readbackAtomicCounters() {
-    auto &bs = GLState.buffer;
-    if (bs.atomicCounterBufferBinding == 0) return;
+static inline __attribute__((always_inline)) void readbackAtomicCounters() {
+    if (!g_atomicCountersActive) return;
 
+    auto &bs = GLState.buffer;
     GLuint realBuf = GLState.GetRealBuffer(bs.atomicCounterBufferBinding);
     if (realBuf) {
         GLES.glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, realBuf);

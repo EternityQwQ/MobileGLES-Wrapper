@@ -262,6 +262,22 @@ static inline std::pair<GLuint, bool> find_real_buffer_with_exists(GLuint key) {
     return {0, false};
 }
 
+// ============================================================================
+// Atomic counter fast-path flag
+// ============================================================================
+// Reflects whether GLState.buffer.atomicCounter* has any active binding +
+// data. Draw/dispatch entry points consult this single bool instead of
+// performing two dependent memory loads + branches per call. Updated by
+// mg_update_atomic_counters_active_flag() whenever the underlying state
+// changes (reset, bind, unbind).
+bool g_atomicCountersActive = false;
+
+#include "state.h"
+void mg_update_atomic_counters_active_flag() {
+    auto &bs = GLState.buffer;
+    g_atomicCountersActive = (bs.atomicCounterBufferBinding != 0) && !bs.atomicCounterData.empty();
+}
+
 // Fast-path: direct assignment without capacity checks, for use when the caller
 // has already verified the buffer exists (e.g. after find_real_buffer_with_exists).
 // Avoids redundant ensure_buffer_capacity in hot paths like glBindBuffer,
@@ -659,11 +675,11 @@ GLuint find_bound_ssbo_indexed(GLuint index) {
 void bindAllAtomicCounterAsSSBO() {
     const size_t count = g_buffer_map_atomic_buffer_info.size();
     for (size_t i = 0; i < count; ++i) {
-        atomic_buffer buf = g_buffer_map_atomic_buffer_info[i];
+        const auto& buf = g_buffer_map_atomic_buffer_info[i];
         if (buf.id != 0) {
             GLuint realID = find_real_buffer(buf.id);
             GLES.glBindBufferRange(GL_SHADER_STORAGE_BUFFER, i, realID, buf.offset, buf.size);
-            LOG_D("Bound atomic counter buffer %u(real: %u) as SSBO at index %zu", buf, realID, i);
+            LOG_D("Bound atomic counter buffer %u(real: %u) as SSBO at index %zu", buf.id, realID, i);
         }
     }
 }
@@ -697,6 +713,16 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offs
             g_buffer_map_atomic_buffer_info.resize(GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS, {});
         }
         g_buffer_map_atomic_buffer_info[index] = {buffer, size, offset};
+        // Atomic counter emulation state is now potentially active; refresh
+        // the cached fast-path flag consulted by every draw/dispatch.
+        GLState.buffer.atomicCounterBufferBinding = buffer;
+        GLState.buffer.atomicCounterBufferSize = size;
+        GLState.buffer.atomicCounterBufferOffset = offset;
+        if (buffer != 0 && !GLState.buffer.atomicCounterData.empty()) {
+            g_atomicCountersActive = true;
+        } else {
+            g_atomicCountersActive = false;
+        }
     } else if (target == GL_SHADER_STORAGE_BUFFER) {
         track_ssbo_indexed(index, real_buffer);
     }

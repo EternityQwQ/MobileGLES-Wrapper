@@ -29,10 +29,24 @@ set(SPIRV_CROSS_ENABLE_UTIL    OFF CACHE BOOL "Disable util" FORCE)
 add_subdirectory(3rdparty/glslang)
 add_subdirectory(3rdparty/SPIRV-Cross)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -fvisibility=hidden -funwind-tables -g -D_THREAD_SAFE -fPIC")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -w -g -std=gnu99 -funwind-tables -fvisibility=hidden")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -fvisibility=hidden -fvisibility-inlines-hidden -funwind-tables -g -D_THREAD_SAFE -fPIC")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -w -g -std=gnu99 -funwind-tables -fvisibility=hidden -fvisibility-inlines-hidden")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libstdc++")
 set(CMAKE_ANDROID_STL_TYPE c++_static)
+
+# Hot-path micro-optimizations:
+#   -fno-trapping-math:        GL wrappers don't rely on FP traps; lets the
+#                              compiler reorder/reciprocal-approximate FP.
+#   -fno-signaling-nans:       Same rationale; std::nan / quiet-NaN checks
+#                              are unaffected.
+#   -ffp-contract=fast:        Permit FMA contraction for vertex/uniform
+#                              packed math without per-op errno setup.
+#   -fno-math-errno is already on by -ffast-math-lite below; we set it
+#   explicitly to keep behavior stable across toolchains.
+# These do NOT enable -ffast-math (which would flip flush-to-zero and
+# break depth-range calculations); they only relax math-side CPU stalls.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-trapping-math -fno-signaling-nans -ffp-contract=fast -fno-math-errno")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-trapping-math -fno-signaling-nans -ffp-contract=fast -fno-math-errno")
 
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     # Check if ThinLTO or LTO is suppported

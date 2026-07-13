@@ -243,7 +243,7 @@ TextureObject* GetOrCreateTextureObject(GLuint index) {
     return obj;
 }
 
-void ActivateTextureUnit(int unit) {
+static void ActivateTextureUnit(int unit) {
     if (unit < 0 || unit >= MAX_TEXTURE_IMAGE_UNITS) {
         LOG_E("Invalid texture unit: %d", unit);
         return;
@@ -255,7 +255,10 @@ int GetCurrentTextureUnitIndex() {
     return CurrentTextureUnitIndex;
 }
 
-TextureUnit& GetTextureUnit(int unit) {
+// Marked static so the compiler knows these have internal linkage and
+// can be inlined into the glBindTexture / MarkTextureObjectForDeletion
+// hot paths without a cross-TU call.
+static TextureUnit& GetTextureUnit(int unit) {
     if (unit < 0 || unit >= MAX_TEXTURE_IMAGE_UNITS) {
         LOG_E("Invalid texture unit: %d", unit);
         return TextureUnits[0];

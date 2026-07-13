@@ -71,12 +71,19 @@ extern "C" GLAPI GLAPIENTRY void glBindFramebuffer(GLenum target, GLuint framebu
     LOG()
     GLES.glBindFramebuffer(target, framebuffer);
 
+    // Hot path: most callers pass GL_FRAMEBUFFER (0x8D40), which binds to
+    // both draw and read targets. Restructured so the common case is a
+    // single branch instead of two OR-checks that each re-test the same
+    // value. The DRAW/READ-only splits are cold by comparison.
     auto &fb = GLState.framebuffer;
-    if (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER) {
+    if (target == GL_FRAMEBUFFER) [[likely]] {
+        fb.drawFBO = framebuffer;
+        fb.readFBO = framebuffer;
+        GLState.currentDrawFBO = framebuffer;
+    } else if (target == GL_DRAW_FRAMEBUFFER) {
         fb.drawFBO = framebuffer;
         GLState.currentDrawFBO = framebuffer;
-    }
-    if (target == GL_FRAMEBUFFER || target == GL_READ_FRAMEBUFFER) {
+    } else if (target == GL_READ_FRAMEBUFFER) {
         fb.readFBO = framebuffer;
     }
 

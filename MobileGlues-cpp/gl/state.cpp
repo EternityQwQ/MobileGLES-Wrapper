@@ -16,6 +16,12 @@
 #include "../gles/loader.h"
 #include <cstring>
 
+// Forward-declared from buffer.cpp (C-linkage, declared in buffer.h);
+// updates the cached fast-path flag g_atomicCountersActive. Called from
+// BufferState::Reset() so that after a context reset the draw hot path
+// doesn't try to sync phantom atomic-counter state.
+extern "C" void mg_update_atomic_counters_active_flag();
+
 // ============================================================================
 // ErrorState Implementation
 // ============================================================================
@@ -42,8 +48,9 @@ const Error* ErrorState::PeekGLError() const {
 
 std::unique_ptr<Error> ErrorState::PopGLError() {
     if (m_errors.empty()) return nullptr;
+    // deque::pop_front is O(1); vector::erase(begin()) was O(n).
     auto error = std::move(m_errors.front());
-    m_errors.erase(m_errors.begin());
+    m_errors.pop_front();
     return error;
 }
 
@@ -59,7 +66,7 @@ const Error* ErrorState::PeekNonGLError() const {
 std::unique_ptr<Error> ErrorState::PopNonGLError() {
     if (m_nonGLErrors.empty()) return nullptr;
     auto error = std::move(m_nonGLErrors.front());
-    m_nonGLErrors.erase(m_nonGLErrors.begin());
+    m_nonGLErrors.pop_front();
     return error;
 }
 
@@ -633,6 +640,9 @@ void GLStateManager::BufferState::Reset()
     atomicCounterBufferBinding = 0;
     atomicCounterBufferSize = 0;
     atomicCounterBufferOffset = 0;
+    // Refresh the cached draw-path flag after zeroing the atomic-counter
+    // state; otherwise stale "active" would persist across context resets.
+    mg_update_atomic_counters_active_flag();
 }
 
 void GLStateManager::TextureState::Reset()

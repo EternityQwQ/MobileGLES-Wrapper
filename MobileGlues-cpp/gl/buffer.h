@@ -83,6 +83,14 @@ extern "C"
 
     GLuint find_bound_ssbo_indexed(GLuint index);
 
+    // --- Atomic counter fast-path flag ---
+    // Cached result of (atomicCounterBufferBinding != 0 && !atomicCounterData.empty()).
+    // Set false at init/reset; flipped true only when atomic-counter emulation
+    // is actually in use. Draw/dispatch entry points read this single bool instead
+    // of performing two memory loads + branches per call.
+    extern bool g_atomicCountersActive;
+    void mg_update_atomic_counters_active_flag();
+
     GLuint gen_array();
 
     GLboolean has_array(GLuint key);

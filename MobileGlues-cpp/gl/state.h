@@ -35,6 +35,7 @@
 #include <optional>
 #include <array>
 #include <cstdint>
+#include <deque>
 
 // ============================================================================
 // FastGLIdMap: flat-array ID mapping for O(1) lookup without hashing
@@ -589,8 +590,10 @@ public:
     void Clear();
 
 private:
-    std::vector<std::unique_ptr<Error>> m_errors;
-    std::vector<std::unique_ptr<Error>> m_nonGLErrors;
+    // std::deque gives O(1) front pop; std::vector::erase(begin()) was O(n)
+    // and was called per glGetError() on the hot path.
+    std::deque<std::unique_ptr<Error>> m_errors;
+    std::deque<std::unique_ptr<Error>> m_nonGLErrors;
 };
 
 // ============================================================================
