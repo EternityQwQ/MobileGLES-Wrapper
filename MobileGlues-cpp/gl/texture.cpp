@@ -650,14 +650,25 @@ struct ScopedUnpackTight {
     GLint prevSkipImages;
 
     ScopedUnpackTight() {
-        // Snapshot GLES state and CPU cache together.
-        GLES.glGetIntegerv(GL_UNPACK_ROW_LENGTH, &prevRowLength);
-        GLES.glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &prevSkipPixels);
-        GLES.glGetIntegerv(GL_UNPACK_SKIP_ROWS, &prevSkipRows);
-        GLES.glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlignment);
-        GLES.glGetIntegerv(GL_UNPACK_IMAGE_HEIGHT, &prevImageHeight);
-        GLES.glGetIntegerv(GL_UNPACK_SKIP_IMAGES, &prevSkipImages);
+        // Snapshot from the CPU-side cache maintained by our glPixelStorei()
+        // wrapper. This avoids 6x glGetIntegerv GPU round-trips on every
+        // texture upload that needs a CPU swizzle - a major source of frame
+        // time spikes under high CPU/GPU load. The cache is guaranteed to be
+        // in sync with GLES because all GL_UNPACK_* state changes are routed
+        // through our glPixelStorei() wrapper (see texture.cpp), and no other
+        // code path mutates GL_UNPACK_* on the GLES side.
+        prevRowLength   = GLState.texture.unpackRowLength;
+        prevSkipPixels  = GLState.texture.unpackSkipPixels;
+        prevSkipRows    = GLState.texture.unpackSkipRows;
+        prevAlignment   = GLState.texture.unpackAlignment;
+        prevImageHeight = GLState.texture.unpackImageHeight;
+        prevSkipImages  = GLState.texture.unpackSkipImages;
 
+        // GLES.glPixelStorei() here goes through the raw function-pointer
+        // table and bypasses our wrapper, so it does NOT touch GLState. That
+        // is intentional: GLState must keep holding the caller-visible values
+        // so that swizzle_pixels_for_unpack() (which reads GLState.texture.*)
+        // still computes the correct source stride during this scope.
         GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
         GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
@@ -666,16 +677,16 @@ struct ScopedUnpackTight {
         GLES.glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
     }
     ~ScopedUnpackTight() {
+        // Restore GLES to the caller's state. Raw GLES.glPixelStorei() again
+        // bypasses our wrapper, so GLState is untouched - which is correct:
+        // GLState still holds the caller's values (== prevXxx), so after this
+        // destructor GLES and the CPU cache are back in sync.
         GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, prevRowLength);
         GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, prevSkipPixels);
         GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, prevSkipRows);
         GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlignment);
         GLES.glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, prevImageHeight);
         GLES.glPixelStorei(GL_UNPACK_SKIP_IMAGES, prevSkipImages);
-        // CPU cache is already current - the GLES.glPixelStorei() calls above
-        // were forwarded through the GLES function pointer table which doesn't
-        // touch our cache; that's intentional because the cache is the
-        // caller-visible state and we want it preserved too.
     }
 };
 
@@ -692,11 +703,16 @@ struct ScopedPackTight {
     GLint prevAlignment;
 
     ScopedPackTight() {
-        GLES.glGetIntegerv(GL_PACK_ROW_LENGTH, &prevRowLength);
-        GLES.glGetIntegerv(GL_PACK_SKIP_PIXELS, &prevSkipPixels);
-        GLES.glGetIntegerv(GL_PACK_SKIP_ROWS, &prevSkipRows);
-        GLES.glGetIntegerv(GL_PACK_ALIGNMENT, &prevAlignment);
+        // Snapshot from CPU-side cache (see ScopedUnpackTight rationale):
+        // avoids 4x glGetIntegerv GPU round-trips on every BGRA glReadPixels.
+        prevRowLength  = GLState.texture.packRowLength;
+        prevSkipPixels = GLState.texture.packSkipPixels;
+        prevSkipRows   = GLState.texture.packSkipRows;
+        prevAlignment  = GLState.texture.packAlignment;
 
+        // Raw GLES.glPixelStorei() bypasses our wrapper; GLState keeps the
+        // caller-visible pack values so the post-readback CPU relayout uses
+        // the correct destination stride/skip.
         GLES.glPixelStorei(GL_PACK_ROW_LENGTH, 0);
         GLES.glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         GLES.glPixelStorei(GL_PACK_SKIP_ROWS, 0);
