@@ -16,6 +16,19 @@
 #define DEBUG 0
 
 // ============================================================================
+// Thread-local scratch buffer cache
+// ============================================================================
+// Hot-path texture uploads (glTexSubImage2D with BGRA swizzle) need a tight
+// temporary buffer per call. Avoiding malloc/free on every call is a big
+// win. We keep one growable buffer per thread; it survives across calls
+// and only grows when a larger upload comes in.
+static thread_local MgScratchBuffer t_scratch;
+
+MgScratchBuffer* mg_acquire_scratch_buffer() {
+    return &t_scratch;
+}
+
+// ============================================================================
 // Internal State: Buffer Map Management
 // ============================================================================
 
@@ -40,7 +53,8 @@ static std::vector<GLuint> g_element_array_buffer_per_vao;
 // ============================================================================
 // Maps wrapper PBO id -> CPU shadow buffer. Only GL_PIXEL_UNPACK_BUFFERs get
 // a shadow. See pbo_shadow_* API in buffer.h.
-#include <unordered_map>
+// Uses ankerl::unordered_dense::map (faster than std::unordered_map; the
+// project already depends on it via DSAWrapper.cpp).
 #include <mutex>
 struct PboShadow {
     std::vector<unsigned char> data;
@@ -49,7 +63,7 @@ struct PboShadow {
     GLsizeiptr mapLength = 0;
     bool mapped = false;
 };
-static std::unordered_map<GLuint, PboShadow> g_pbo_shadows;
+static ankerl::unordered_dense::map<GLuint, PboShadow> g_pbo_shadows;
 static std::mutex g_pbo_shadow_mutex;
 
 void pbo_shadow_alloc(GLuint pbo, GLsizeiptr size, const void* data) {

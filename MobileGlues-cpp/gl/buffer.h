@@ -61,6 +61,26 @@ extern "C"
     void* pbo_shadow_map_write(GLuint pbo, GLintptr offset, GLsizeiptr length);
     void pbo_shadow_unmap(GLuint pbo);
 
+    // --- Thread-local scratch buffer cache ---
+    // Texture-upload swizzle path needs a tight temporary buffer per upload
+    // (size = width*height*depth*4). Repeatedly calling malloc/free on every
+    // glTexSubImage2D is a hot-path bottleneck. This cache keeps a per-thread
+    // growable buffer that is reused across calls - acquires returns {ptr,
+    // capacity}; the caller uses min(requestedSize, capacity) bytes and the
+    // memory is recycled on the next acquire. NOT thread-safe across threads;
+    // each thread gets its own slot.
+    struct MgScratchBuffer {
+        void* ptr = nullptr;
+        size_t capacity = 0;
+    };
+    MgScratchBuffer* mg_acquire_scratch_buffer();
+    // Returns true if `ptr` points into the calling thread's scratch buffer.
+    // Use after swizzle_pixels_for_unpack to skip free() for scratch-owned
+    // memory (the scratch buffer is reused on the next call).
+    inline bool mg_scratch_owns(const void* ptr) {
+        return ptr != nullptr && ptr == mg_acquire_scratch_buffer()->ptr;
+    }
+
     GLuint find_bound_ssbo_indexed(GLuint index);
 
     GLuint gen_array();

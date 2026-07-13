@@ -766,23 +766,27 @@ void CopyAndSwizzleRGBA8(void* dst, GLsizei dstStride,
     // swizzle == {SWIZZLE_BLUE, SWIZZLE_GREEN, SWIZZLE_RED, SWIZZLE_ALPHA}
     if (swizzle[0] == SWIZZLE_BLUE  && swizzle[1] == SWIZZLE_GREEN &&
         swizzle[2] == SWIZZLE_RED   && swizzle[3] == SWIZZLE_ALPHA) {
+        // Hint: pointers are 4-byte aligned (each pixel is 4 bytes), which
+        // helps the compiler vectorise the inner loop.
+        const unsigned char* sp = static_cast<const unsigned char*>(__builtin_assume_aligned(s, 4));
+        unsigned char* dp = static_cast<unsigned char*>(__builtin_assume_aligned(d, 4));
         for (GLsizei z = 0; z < depth; ++z) {
-            const unsigned char* srcRow = s;
-            unsigned char* dstRow = d;
+            const unsigned char* srcRow = sp;
+            unsigned char* dstRow = dp;
             for (GLsizei y = 0; y < height; ++y) {
                 for (GLsizei i = 0; i < width; ++i) {
-                    const unsigned char* sp = srcRow + i * 4;
-                    unsigned char* dp = dstRow + i * 4;
-                    unsigned char b = sp[0];   // B
-                    dp[1] = sp[1];             // G
-                    dp[0] = sp[2];             // R <- swap
-                    dp[2] = b;                 // B <- swap
-                    dp[3] = sp[3];             // A
+                    const unsigned char* p = srcRow + i * 4;
+                    unsigned char* o = dstRow + i * 4;
+                    unsigned char b = p[0];   // B
+                    o[1] = p[1];              // G
+                    o[0] = p[2];              // R <- swap
+                    o[2] = b;                 // B <- swap
+                    o[3] = p[3];              // A
                 }
                 srcRow += srcStride;
                 dstRow += dstStride;
             }
-            s += srcImageStride;
+            sp += srcImageStride;
         }
         return;
     }
@@ -792,22 +796,24 @@ void CopyAndSwizzleRGBA8(void* dst, GLsizei dstStride,
     // Memory layout [A,R,G,B] -> output [R,G,B,A]
     if (swizzle[0] == SWIZZLE_GREEN && swizzle[1] == SWIZZLE_BLUE &&
         swizzle[2] == SWIZZLE_ALPHA && swizzle[3] == SWIZZLE_RED) {
+        const unsigned char* sp = static_cast<const unsigned char*>(__builtin_assume_aligned(s, 4));
+        unsigned char* dp = static_cast<unsigned char*>(__builtin_assume_aligned(d, 4));
         for (GLsizei z = 0; z < depth; ++z) {
-            const unsigned char* srcRow = s;
-            unsigned char* dstRow = d;
+            const unsigned char* srcRow = sp;
+            unsigned char* dstRow = dp;
             for (GLsizei y = 0; y < height; ++y) {
                 for (GLsizei i = 0; i < width; ++i) {
-                    const unsigned char* sp = srcRow + i * 4;
-                    unsigned char* dp = dstRow + i * 4;
-                    dp[0] = sp[1];   // R
-                    dp[1] = sp[2];   // G
-                    dp[2] = sp[3];   // B
-                    dp[3] = sp[0];   // A
+                    const unsigned char* p = srcRow + i * 4;
+                    unsigned char* o = dstRow + i * 4;
+                    o[0] = p[1];   // R
+                    o[1] = p[2];   // G
+                    o[2] = p[3];   // B
+                    o[3] = p[0];   // A
                 }
                 srcRow += srcStride;
                 dstRow += dstStride;
             }
-            s += srcImageStride;
+            sp += srcImageStride;
         }
         return;
     }

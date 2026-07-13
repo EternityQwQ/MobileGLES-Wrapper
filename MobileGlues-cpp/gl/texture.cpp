@@ -839,13 +839,40 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
 
         const GLuint pixelCount = static_cast<GLuint>(width) * static_cast<GLuint>(height) * static_cast<GLuint>(depth);
         const size_t byteCount = static_cast<size_t>(pixelCount) * bytesPerPixel;
-        void* out = malloc(byteCount);
-        if (!out) {
-            LOG_E("swizzle_pixels_for_unpack: allocation of %zu bytes failed (PBO path)", byteCount)
-            if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
-            if (format == GL_BGRA) format = GL_RGBA;
-            return pixels;
+        // Use the thread-local scratch buffer for small/medium uploads to
+        // avoid malloc/free churn on every glTexSubImage2D. Threshold keeps
+        // the per-thread scratch from growing unbounded; huge uploads fall
+        // back to malloc (caller frees).
+        constexpr size_t kScratchThreshold = 16 * 1024 * 1024; // 16 MiB
+        void* out = nullptr;
+        bool usedScratch = false;
+        if (byteCount <= kScratchThreshold) {
+            MgScratchBuffer* sb = mg_acquire_scratch_buffer();
+            if (sb->capacity < byteCount) {
+                // Grow with 2x slack to amortise growth across near-sized uploads.
+                size_t newCap = sb->capacity ? sb->capacity : (64 * 1024);
+                while (newCap < byteCount) newCap *= 2;
+                void* newPtr = realloc(sb->ptr, newCap);
+                if (newPtr) {
+                    sb->ptr = newPtr;
+                    sb->capacity = newCap;
+                }
+            }
+            if (sb->ptr && sb->capacity >= byteCount) {
+                out = sb->ptr;
+                usedScratch = true;
+            }
         }
+        if (!out) {
+            out = malloc(byteCount);
+            if (!out) {
+                LOG_E("swizzle_pixels_for_unpack: allocation of %zu bytes failed (PBO path)", byteCount)
+                if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
+                if (format == GL_BGRA) format = GL_RGBA;
+                return pixels;
+            }
+        }
+        (void)usedScratch; // caller distinguishes via mg_acquire_scratch_buffer()->ptr compare.
 
         // Combined copy + swizzle in a single pass. Output is tightly packed
         // (dstRowStride = width*4). Source row/image strides honour
@@ -922,10 +949,30 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
 
     const GLuint pixelCount = static_cast<GLuint>(width) * static_cast<GLuint>(height) * static_cast<GLuint>(depth);
     const size_t byteCount = static_cast<size_t>(pixelCount) * bytesPerPixel;
-    void* out = malloc(byteCount);
+    // Reuse the per-thread scratch buffer for typical texture sizes.
+    constexpr size_t kScratchThreshold = 16 * 1024 * 1024; // 16 MiB
+    void* out = nullptr;
+    if (byteCount <= kScratchThreshold) {
+        MgScratchBuffer* sb = mg_acquire_scratch_buffer();
+        if (sb->capacity < byteCount) {
+            size_t newCap = sb->capacity ? sb->capacity : (64 * 1024);
+            while (newCap < byteCount) newCap *= 2;
+            void* newPtr = realloc(sb->ptr, newCap);
+            if (newPtr) {
+                sb->ptr = newPtr;
+                sb->capacity = newCap;
+            }
+        }
+        if (sb->ptr && sb->capacity >= byteCount) {
+            out = sb->ptr;
+        }
+    }
     if (!out) {
-        LOG_E("swizzle_pixels_for_unpack: allocation of %zu bytes failed", byteCount)
-        return pixels;
+        out = malloc(byteCount);
+        if (!out) {
+            LOG_E("swizzle_pixels_for_unpack: allocation of %zu bytes failed", byteCount)
+            return pixels;
+        }
     }
 
     // Combined copy + swizzle (single pass, specialised for BGRA->RGBA).
@@ -1088,7 +1135,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
         GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, uploadPixels);
     }
 
-    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
+    if (uploadPixels != pixels && uploadPixels != nullptr && !mg_scratch_owns(uploadPixels))
+        free(const_cast<void*>(uploadPixels));
 
     CHECK_GL_ERROR
 }
@@ -1148,7 +1196,8 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
         GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
     }
 
-    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
+    if (uploadPixels != pixels && uploadPixels != nullptr && !mg_scratch_owns(uploadPixels))
+        free(const_cast<void*>(uploadPixels));
 
     CHECK_GL_ERROR
 }
@@ -1191,7 +1240,8 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
         GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, uploadPixels);
     }
 
-    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
+    if (uploadPixels != pixels && uploadPixels != nullptr && !mg_scratch_owns(uploadPixels))
+        free(const_cast<void*>(uploadPixels));
 
     CHECK_GL_ERROR
 }
@@ -1227,7 +1277,8 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
         GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, uploadPixels);
     }
 
-    if (uploadPixels != pixels && uploadPixels != nullptr) free(const_cast<void*>(uploadPixels));
+    if (uploadPixels != pixels && uploadPixels != nullptr && !mg_scratch_owns(uploadPixels))
+        free(const_cast<void*>(uploadPixels));
 
     CHECK_GL_ERROR
 }
