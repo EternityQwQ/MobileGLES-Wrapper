@@ -77,6 +77,18 @@ enum SwizzleChannel : unsigned char {
 // Assumes each channel is exactly 1 byte (RGBA8/BGRA8/etc.).
 void ProcessColorSwizzle(void* data, GLuint pixelCount, const unsigned char* swizzle, int channels);
 
+// Combined copy+swizzle: copies `pixelCount` pixels from `src` to `dst` while
+// applying a 4-channel byte swizzle. Equivalent to memcpy then
+// ProcessColorSwizzle, but a single pass - faster for the common BGRA->RGBA
+// case on the hot texture-upload path.
+// `srcStride` and `dstStride` are in bytes per row; pass equal strides for
+// tightly packed 4-byte-per-pixel data.
+void CopyAndSwizzleRGBA8(void* dst, GLsizei dstStride,
+                          const void* src, GLsizei srcStride,
+                          GLsizei width, GLsizei height, GLsizei depth,
+                          GLsizei srcImageStride,
+                          const unsigned char swizzle[4]);
+
 // Determines whether a CPU swizzle is required when uploading pixel data of
 // (srcFormat, srcType) into an RGBA8 texture. If so, fills `out` with the
 // 4-channel swizzle that converts the in-memory bytes to GL_RGBA +

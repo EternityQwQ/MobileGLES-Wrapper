@@ -740,6 +740,92 @@ void ProcessColorSwizzle(void* data, GLuint pixelCount, const unsigned char* swi
     }
 }
 
+// Combined copy + 4-channel byte swizzle in a single pass.
+//
+// Detects the two most common swizzle patterns emitted by
+// get_rgba8_unpack_swizzle and dispatches to a tight specialised loop:
+//   - BGRA->RGBA (R/B swap): {Blue, Green, Red, Alpha}
+//   - GL_UNSIGNED_INT_8_8_8_8 BGRA->RGBA: {Green, Blue, Alpha, Red}
+// Both avoid the per-channel switch of the generic in-place swizzle and
+// let the compiler vectorise the inner loop. Falls back to the generic
+// in-place algorithm (copy + ProcessColorSwizzle) for arbitrary swizzles.
+//
+// `dstStride`/`srcStride` are row strides in bytes. `srcImageStride` is the
+// 3D image stride in bytes; for 2D (depth==1) it is ignored.
+void CopyAndSwizzleRGBA8(void* dst, GLsizei dstStride,
+                          const void* src, GLsizei srcStride,
+                          GLsizei width, GLsizei height, GLsizei depth,
+                          GLsizei srcImageStride,
+                          const unsigned char swizzle[4]) {
+    if (!dst || !src || width <= 0 || height <= 0 || depth <= 0) return;
+    const unsigned char* s = static_cast<const unsigned char*>(src);
+    unsigned char* d = static_cast<unsigned char*>(dst);
+    const GLsizei rowBytes = width * 4;
+
+    // Fast path: BGRA -> RGBA = swap bytes 0 and 2, keep G and A.
+    // swizzle == {SWIZZLE_BLUE, SWIZZLE_GREEN, SWIZZLE_RED, SWIZZLE_ALPHA}
+    if (swizzle[0] == SWIZZLE_BLUE  && swizzle[1] == SWIZZLE_GREEN &&
+        swizzle[2] == SWIZZLE_RED   && swizzle[3] == SWIZZLE_ALPHA) {
+        for (GLsizei z = 0; z < depth; ++z) {
+            const unsigned char* srcRow = s;
+            unsigned char* dstRow = d;
+            for (GLsizei y = 0; y < height; ++y) {
+                for (GLsizei i = 0; i < width; ++i) {
+                    const unsigned char* sp = srcRow + i * 4;
+                    unsigned char* dp = dstRow + i * 4;
+                    unsigned char b = sp[0];   // B
+                    dp[1] = sp[1];             // G
+                    dp[0] = sp[2];             // R <- swap
+                    dp[2] = b;                 // B <- swap
+                    dp[3] = sp[3];             // A
+                }
+                srcRow += srcStride;
+                dstRow += dstStride;
+            }
+            s += srcImageStride;
+        }
+        return;
+    }
+
+    // Fast path: GL_UNSIGNED_INT_8_8_8_8 BGRA -> RGBA.
+    // swizzle == {SWIZZLE_GREEN, SWIZZLE_BLUE, SWIZZLE_ALPHA, SWIZZLE_RED}
+    // Memory layout [A,R,G,B] -> output [R,G,B,A]
+    if (swizzle[0] == SWIZZLE_GREEN && swizzle[1] == SWIZZLE_BLUE &&
+        swizzle[2] == SWIZZLE_ALPHA && swizzle[3] == SWIZZLE_RED) {
+        for (GLsizei z = 0; z < depth; ++z) {
+            const unsigned char* srcRow = s;
+            unsigned char* dstRow = d;
+            for (GLsizei y = 0; y < height; ++y) {
+                for (GLsizei i = 0; i < width; ++i) {
+                    const unsigned char* sp = srcRow + i * 4;
+                    unsigned char* dp = dstRow + i * 4;
+                    dp[0] = sp[1];   // R
+                    dp[1] = sp[2];   // G
+                    dp[2] = sp[3];   // B
+                    dp[3] = sp[0];   // A
+                }
+                srcRow += srcStride;
+                dstRow += dstStride;
+            }
+            s += srcImageStride;
+        }
+        return;
+    }
+
+    // Generic fallback: copy row-by-row then in-place swizzle.
+    for (GLsizei z = 0; z < depth; ++z) {
+        const unsigned char* srcRow = s;
+        unsigned char* dstRow = d;
+        for (GLsizei y = 0; y < height; ++y) {
+            memcpy(dstRow, srcRow, rowBytes);
+            ProcessColorSwizzle(dstRow, static_cast<GLuint>(width), swizzle, 4);
+            srcRow += srcStride;
+            dstRow += dstStride;
+        }
+        s += srcImageStride;
+    }
+}
+
 bool get_rgba8_unpack_swizzle(GLenum srcFormat, GLenum srcType, unsigned char out[4]) {
     // GL_BGRA sources: the in-memory byte order differs from GL_RGBA, so a
     // channel rearrangement is required before GLES accepts the data as

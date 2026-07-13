@@ -49,6 +49,12 @@ extern "C"
     const unsigned char* pbo_shadow_get(GLuint pbo);
     // Returns the size of the PBO's CPU shadow data, or 0 if none.
     GLsizeiptr pbo_shadow_size(GLuint pbo);
+    // Combined lookup: returns {ptr, size} in a single locked lookup.
+    const unsigned char* pbo_shadow_get_ptr_size(GLuint pbo, GLsizeiptr* outSize);
+    // If the PBO is currently write-mapped, returns its shadow base pointer
+    // and the mapped [offset, length) range. Returns false if not mapped.
+    bool pbo_shadow_get_mapped_range(GLuint pbo, const unsigned char** outData,
+                                      GLintptr* outOffset, GLsizeiptr* outLength);
     // For glMapBufferRange(GL_MAP_WRITE_BIT): returns a writable CPU pointer
     // into the shadow buffer at `offset`. Caller must call pbo_shadow_unmap
     // to flush the shadow back to GLES.

@@ -733,14 +733,7 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
     //
     // This mirrors the MobileGL-DirectGLES reference design, which keeps a
     // CPU shadow copy of every PBO and converts `pixels` into a real CPU
-    // pointer before running the standard swizzle pipeline. Without a full
-    // shadow-copy architecture we use glMapBufferRange(GL_MAP_READ_BIT) for a
-    // one-shot readback instead - slower but correct.
-    //
-    // If we did NOT do this and just flipped the format enum to GL_RGBA while
-    // leaving the data in BGRA order, GLES would read the bytes unchanged and
-    // the texture would have red/blue swapped - the "all-blue map" symptom
-    // reported with Xaero's World Map PBO uploads.
+    // pointer before running the standard swizzle pipeline.
     const GLuint boundUnpackPBO = find_bound_buffer(GL_PIXEL_UNPACK_BUFFER_BINDING);
 
     if (boundUnpackPBO != 0) {
@@ -781,20 +774,18 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
             }
         } stagingGuard;
 
-        // Map the PBO for reading.
-        // Strategy: Use the CPU shadow copy maintained by buffer.cpp for
-        // GL_PIXEL_UNPACK_BUFFER. This avoids glMapBufferRange(GL_MAP_READ_BIT)
-        // which fails on many GLES drivers for write-only-usage buffers.
-        // The shadow is kept in sync by glBufferData/glBufferSubData/
-        // glMapBufferRange(write)+glUnmapBuffer in buffer.cpp.
-        // This mirrors MobileGL-DirectGLES's CPU shadow architecture.
-        const unsigned char* shadowData = pbo_shadow_get(boundUnpackPBO);
+        // Resolve the PBO data source. Prefer the CPU shadow maintained by
+        // buffer.cpp (avoids glMapBufferRange(GL_MAP_READ_BIT) which fails on
+        // many GLES drivers for write-only-usage buffers). Use the combined
+        // ptr+size lookup to halve mutex acquisitions on the hot path.
+        GLsizeiptr shadowSize = 0;
+        const unsigned char* shadowData = pbo_shadow_get_ptr_size(boundUnpackPBO, &shadowSize);
 
         // Fallback: if no shadow exists, use glCopyBufferSubData to copy the
         // PBO data into a staging buffer, then map the staging buffer for
-        // reading. This works because the staging buffer is a fresh GL_STATIC_READ
-        // buffer which drivers typically allow read-mapping even when they
-        // reject read-mapping on GL_STREAM_DRAW PBOs.
+        // reading. This works because the staging buffer is a fresh
+        // GL_STATIC_READ buffer which drivers typically allow read-mapping
+        // even when they reject read-mapping on GL_STREAM_DRAW PBOs.
         if (!shadowData) {
             GLint pboSize2 = 0;
             GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &pboSize2);
@@ -809,26 +800,16 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
                 if (mapped) {
                     stagingGuard.mapped = true;
                     shadowData = mapped;
+                    shadowSize = pboSize2;
                 } else {
-                    // Mapping failed - guard will unbind and delete the buffer.
                     stagingGuard.mapped = false;
                 }
             }
         }
 
-        if (!shadowData) {
+        if (!shadowData || shadowSize <= 0) {
             LOG_E("swizzle_pixels_for_unpack: no CPU shadow for PBO %u and glCopyBufferSubData fallback failed",
                   boundUnpackPBO)
-            if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
-            if (format == GL_BGRA) format = GL_RGBA;
-            return pixels;
-        }
-
-        GLint pboSize = 0;
-        GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &pboSize);
-        if (pboSize <= 0) {
-            LOG_E("swizzle_pixels_for_unpack: PBO %u has invalid size %d",
-                  boundUnpackPBO, pboSize)
             if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
             if (format == GL_BGRA) format = GL_RGBA;
             return pixels;
@@ -866,35 +847,17 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
             return pixels;
         }
 
+        // Combined copy + swizzle in a single pass. Output is tightly packed
+        // (dstRowStride = width*4). Source row/image strides honour
+        // GL_UNPACK_* layout. This fuses the previous memcpy + in-place
+        // ProcessColorSwizzle pair into one pass over the data.
         const unsigned char* src = pboSrc + srcSkipOffset;
-        unsigned char* dst = static_cast<unsigned char*>(out);
-        const size_t srcRowBytes = static_cast<size_t>(width) * bytesPerPixel;
-        if (srcRowStride == static_cast<GLuint>(width) * bytesPerPixel && depth == 1) {
-            memcpy(dst, src, byteCount);
-        } else {
-            for (GLsizei z = 0; z < depth; ++z) {
-                const unsigned char* srcRow = src + static_cast<size_t>(z) * srcImageStride;
-                for (GLsizei y = 0; y < height; ++y) {
-                    memcpy(dst, srcRow, srcRowBytes);
-                    srcRow += srcRowStride;
-                    dst += srcRowBytes;
-                }
-            }
-        }
-
-        // Run the swizzle on the tight buffer.
-        // Diagnostic: log first pixel before/after swizzle to verify correctness.
-        if (pixelCount > 0) {
-            LOG_E("PBO_SWIZZLE: pbo=%u fmt=0x%X type=0x%X swizzle={%d,%d,%d,%d} before=[%02X %02X %02X %02X]",
-                  boundUnpackPBO, format, type, swizzle[0], swizzle[1], swizzle[2], swizzle[3],
-                  src[0], src[1], src[2], src[3]);
-        }
-        ProcessColorSwizzle(out, pixelCount, swizzle, 4);
-        if (pixelCount > 0) {
-            unsigned char* p = static_cast<unsigned char*>(out);
-            LOG_E("PBO_SWIZZLE: after swizzle first pixel=[%02X %02X %02X %02X]",
-                  p[0], p[1], p[2], p[3]);
-        }
+        const GLsizei dstRowStride = static_cast<GLsizei>(width) * 4;
+        CopyAndSwizzleRGBA8(out, dstRowStride,
+                            src, static_cast<GLsizei>(srcRowStride),
+                            width, height, depth,
+                            static_cast<GLsizei>(srcImageStride),
+                            swizzle);
 
         // Temporarily unbind the PBO so GLES reads from `out` (a real CPU
         // pointer) instead of treating it as a byte offset into the PBO.
@@ -965,37 +928,14 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
         return pixels;
     }
 
-    // Copy from source (with row stride + skip) into the tightly-packed `out`.
+    // Combined copy + swizzle (single pass, specialised for BGRA->RGBA).
     const unsigned char* src = static_cast<const unsigned char*>(pixels) + srcSkipOffset;
-    unsigned char* dst = static_cast<unsigned char*>(out);
-    const size_t srcRowBytes = static_cast<size_t>(width) * bytesPerPixel;
-    if (srcRowStride == static_cast<GLuint>(width) * bytesPerPixel && depth == 1) {
-        // Source is already tightly packed - single memcpy is enough.
-        memcpy(dst, src, byteCount);
-    } else {
-        // Per-row copy (handles non-default row length / alignment).
-        for (GLsizei z = 0; z < depth; ++z) {
-            const unsigned char* srcRow = src + static_cast<size_t>(z) * srcImageStride;
-            for (GLsizei y = 0; y < height; ++y) {
-                memcpy(dst, srcRow, srcRowBytes);
-                srcRow += srcRowStride;
-                dst += srcRowBytes;
-            }
-        }
-    }
-
-    // Diagnostic: log first pixel before/after swizzle for non-PBO path.
-    if (pixelCount > 0) {
-        LOG_E("CPU_SWIZZLE: fmt=0x%X type=0x%X swizzle={%d,%d,%d,%d} before=[%02X %02X %02X %02X]",
-              format, type, swizzle[0], swizzle[1], swizzle[2], swizzle[3],
-              src[0], src[1], src[2], src[3]);
-    }
-    ProcessColorSwizzle(out, pixelCount, swizzle, 4);
-    if (pixelCount > 0) {
-        unsigned char* p = static_cast<unsigned char*>(out);
-        LOG_E("CPU_SWIZZLE: after swizzle first pixel=[%02X %02X %02X %02X]",
-              p[0], p[1], p[2], p[3]);
-    }
+    const GLsizei dstRowStride = static_cast<GLsizei>(width) * 4;
+    CopyAndSwizzleRGBA8(out, dstRowStride,
+                        src, static_cast<GLsizei>(srcRowStride),
+                        width, height, depth,
+                        static_cast<GLsizei>(srcImageStride),
+                        swizzle);
 
     // GLES now sees a clean GL_RGBA + GL_UNSIGNED_BYTE upload. The caller is
     // responsible for wrapping the GLES call in ScopedUnpackTight() so that

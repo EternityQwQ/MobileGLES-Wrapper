@@ -100,6 +100,35 @@ GLsizeiptr pbo_shadow_size(GLuint pbo) {
     return static_cast<GLsizeiptr>(it->second.data.size());
 }
 
+// Combined lookup: returns {ptr, size} in a single locked lookup. Use this
+// instead of calling pbo_shadow_get() + pbo_shadow_size() separately to halve
+// the mutex acquisitions on the hot texture-upload path.
+const unsigned char* pbo_shadow_get_ptr_size(GLuint pbo, GLsizeiptr* outSize) {
+    if (pbo == 0) { if (outSize) *outSize = 0; return nullptr; }
+    std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
+    auto it = g_pbo_shadows.find(pbo);
+    if (it == g_pbo_shadows.end()) { if (outSize) *outSize = 0; return nullptr; }
+    if (outSize) *outSize = static_cast<GLsizeiptr>(it->second.data.size());
+    return it->second.data.data();
+}
+
+// Returns the mapped region [offset, offset+length) for a write-mapped PBO.
+// If the PBO is currently write-mapped, returns {ptr, offset, length} in a
+// single locked lookup so glUnmapBuffer can sync only the dirty region
+// instead of the whole shadow.
+bool pbo_shadow_get_mapped_range(GLuint pbo, const unsigned char** outData, GLintptr* outOffset, GLsizeiptr* outLength) {
+    if (pbo == 0) return false;
+    std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
+    auto it = g_pbo_shadows.find(pbo);
+    if (it == g_pbo_shadows.end()) return false;
+    auto& s = it->second;
+    if (!s.mapped) return false;
+    if (outData)    *outData    = s.data.data();
+    if (outOffset)  *outOffset  = s.mapOffset;
+    if (outLength)  *outLength  = s.mapLength;
+    return true;
+}
+
 void* pbo_shadow_map_write(GLuint pbo, GLintptr offset, GLsizeiptr length) {
     if (pbo == 0 || length <= 0) return nullptr;
     std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
@@ -550,28 +579,22 @@ GLboolean glUnmapBuffer(GLenum target) {
     LOG()
     LOG_D("%s(%s)", __func__, glEnumToString(target));
     // For PBO write mappings, we returned a pointer into the CPU shadow.
-    // Now sync the shadow data to the actual GLES buffer via glBufferSubData
-    // (which is always supported, unlike glMapBufferRange(GL_MAP_READ_BIT)).
+    // Now sync only the dirty mapped region to the GLES buffer via
+    // glBufferSubData (which is always supported, unlike
+    // glMapBufferRange(GL_MAP_READ_BIT)). Syncing only the mapped range
+    // avoids uploading the whole shadow when the app mapped a small slice.
     if (target == GL_PIXEL_UNPACK_BUFFER) {
         int idx = binding_target_to_index(target);
         if (idx >= 0) {
             GLuint pbo = g_bound_buffers_arr[idx];
             if (pbo != 0) {
-                // Find the shadow and flush the mapped region to GLES.
-                const unsigned char* shadowData = pbo_shadow_get(pbo);
-                // Check if this PBO has a write mapping active.
-                // We need to peek at the mapped state - pbo_shadow_unmap
-                // returns void, so we check by attempting to get the data
-                // and looking at whether a mapping was active.
-                // Simplest: just call pbo_shadow_unmap which marks unmapped.
-                if (shadowData) {
-                    // Sync the shadow data to the GLES buffer using the
-                    // shadow's actual size (more reliable than
-                    // get_buffer_data_size which may be stale if the PBO
-                    // was initially created via a non-UNPACK target).
-                    GLsizeiptr sz = pbo_shadow_size(pbo);
-                    if (sz > 0) {
-                        GLES.glBufferSubData(target, 0, sz, shadowData);
+                const unsigned char* shadowBase = nullptr;
+                GLintptr mapOffset = 0;
+                GLsizeiptr mapLength = 0;
+                if (pbo_shadow_get_mapped_range(pbo, &shadowBase, &mapOffset, &mapLength)) {
+                    if (shadowBase && mapLength > 0) {
+                        GLES.glBufferSubData(target, mapOffset, mapLength,
+                                              shadowBase + mapOffset);
                     }
                 }
                 pbo_shadow_unmap(pbo);
