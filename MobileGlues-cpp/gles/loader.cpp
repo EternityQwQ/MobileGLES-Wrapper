@@ -200,6 +200,32 @@ void InitGLESCapabilities() {
                 g_gles_caps.KHR_texture_compression_astc_ldr = 1;
             } else if (strcmp(extension, "GL_EXT_texture_filter_anisotropic") == 0) {
                 g_gles_caps.EXT_texture_filter_anisotropic = 1;
+            } else if (strcmp(extension, "GL_EXT_color_buffer_float") == 0) {
+                // Required for RGBA32F / R11F_G11F_B10F / RGB32F / RG32F / R32F
+                // as color-renderable FBO attachments. Without it, GLES drivers
+                // reject these formats with GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT
+                // even though desktop GL accepts them as core.
+                g_gles_caps.GL_EXT_color_buffer_float = 1;
+            } else if (strcmp(extension, "GL_EXT_color_buffer_half_float") == 0) {
+                // Required for RGBA16F / RG16F / R16F / RGB16F as
+                // color-renderable FBO attachments. Advertised separately from
+                // GL_EXT_color_buffer_float on many mobile drivers.
+                g_gles_caps.GL_EXT_color_buffer_half_float = 1;
+            } else if (strcmp(extension, "GL_EXT_texture_norm16") == 0) {
+                // Required to keep GL_RGBA16 / GL_RG16 / GL_R16 / GL_RGB16
+                // as-is instead of downgrading them to float formats in
+                // internal_convert(). Was declared in gles_caps_t but never
+                // detected before, so the GL_RGBA16 -> GL_RGBA16F downgrade
+                // always ran even on devices that natively support norm16.
+                g_gles_caps.GL_EXT_texture_norm16 = 1;
+            } else if (strcmp(extension, "GL_EXT_texture_rg") == 0) {
+                g_gles_caps.GL_EXT_texture_rg = 1;
+            } else if (strcmp(extension, "GL_OES_depth_texture") == 0) {
+                g_gles_caps.GL_OES_depth_texture = 1;
+            } else if (strcmp(extension, "GL_OES_depth24") == 0) {
+                g_gles_caps.GL_OES_depth24 = 1;
+            } else if (strcmp(extension, "GL_OES_depth_texture_float") == 0) {
+                g_gles_caps.GL_OES_depth_texture_float = 1;
             }
         } else {
             LOG_D("(nullptr)")
@@ -207,6 +233,9 @@ void InitGLESCapabilities() {
     }
 
     LOG_I("%sDetected GL_EXT_multi_draw_indirect!", g_gles_caps.GL_EXT_multi_draw_indirect ? "" : "Not ")
+    LOG_I("%sDetected GL_EXT_color_buffer_float!", g_gles_caps.GL_EXT_color_buffer_float ? "" : "Not ")
+    LOG_I("%sDetected GL_EXT_color_buffer_half_float!", g_gles_caps.GL_EXT_color_buffer_half_float ? "" : "Not ")
+    LOG_I("%sDetected GL_EXT_texture_norm16!", g_gles_caps.GL_EXT_texture_norm16 ? "" : "Not ")
 
     // ---- Map optional ES extensions to desktop GL extensions ----
 

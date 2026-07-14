@@ -164,6 +164,14 @@ extern "C"
         int EXT_texture_query_lod;
         int KHR_texture_compression_astc_ldr;
         int EXT_texture_filter_anisotropic;
+        // Float color buffer support. Required by GLES drivers to allow
+        // float/half-float internalformats (RGBA16F, RGBA32F,
+        // R11F_G11F_B10F, etc.) as color-renderable FBO attachments.
+        // Without these, glCheckFramebufferStatus returns
+        // GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT for FBOs that desktop GL
+        // (and Iris shader packs) create routinely.
+        int GL_EXT_color_buffer_float;        // RGBA32F, R11F_G11F_B10F, RGB32F, RG32F, R32F
+        int GL_EXT_color_buffer_half_float;   // RGBA16F, RG16F, R16F, RGB16F
     };
 
     extern struct gles_caps_t g_gles_caps;
