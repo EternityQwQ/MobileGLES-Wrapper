@@ -751,10 +751,18 @@ public:
         GLuint drawFBO = 0;    // virtual
         GLuint readFBO = 0;    // virtual
 
-        // Attachment tracking: virtual FBO → attachment → {real FBO, attachment}
+        // Attachment tracking: virtual FBO → attachment → {real FBO, attachment, texture}
+        // The `texture` field stores the virtual texture ID attached at this
+        // attachment point (0 = no texture attached). It is consulted by
+        // glCheckFramebufferStatus() to detect when
+        // GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT is caused by a float
+        // internalformat that GLES rejects without GL_EXT_color_buffer_float /
+        // GL_EXT_color_buffer_half_float, so that status can be promoted to
+        // COMPLETE to match desktop GL behaviour.
         struct AttachmentInfo {
             GLuint fbo = 0;          // real FBO
             GLenum attachment = 0;   // real attachment point
+            GLuint texture = 0;      // virtual texture ID (0 = no texture attached)
         };
         UnorderedMap<GLuint, UnorderedMap<GLenum, AttachmentInfo>> attachments;
 

@@ -16,11 +16,52 @@
 #include "log.h"
 #include "../gles/loader.h"
 #include "mg.h"
+#include "texture.h"
 #include <GLES3/gl32.h>
 #include <cstring>
 #include <vector>
 
 #define DEBUG 0
+
+// ---------------------------------------------------------------------------
+// Float color-format detection helper.
+//
+// GLES 3.2 core only guarantees color-renderability for a small set of
+// formats (RGBA8, RGB10_A2, SRGB8_ALPHA8, the RGBA8/16/32 *UI/I variants,
+// etc.). Float and half-float internalformats require the
+// GL_EXT_color_buffer_float / GL_EXT_color_buffer_half_float extensions to
+// be usable as FBO color attachments; without them glCheckFramebufferStatus
+// returns GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT even though desktop GL (the
+// API MobileGlues translates *from*) accepts these configurations as core
+// since GL 3.0.
+//
+// This helper returns true when `internalFormat` is a float format whose
+// required color-buffer extension is NOT present on the underlying GLES
+// driver. glCheckFramebufferStatus() uses it to decide whether to promote
+// INCOMPLETE_ATTACHMENT -> COMPLETE so that Iris shader packs (which
+// routinely attach RGBA16F / RGBA32F / R11F_G11F_B10F color textures)
+// keep rendering instead of disabling shaders.
+// ---------------------------------------------------------------------------
+static bool float_color_format_needs_missing_ext(GLenum internalFormat) {
+    switch (internalFormat) {
+    // Half-float color attachments — require GL_EXT_color_buffer_half_float.
+    case GL_RGBA16F:
+    case GL_RG16F:
+    case GL_R16F:
+    case GL_RGB16F:
+        return !g_gles_caps.GL_EXT_color_buffer_half_float;
+    // Full-float color attachments — require GL_EXT_color_buffer_float.
+    case GL_RGBA32F:
+    case GL_RGB32F:
+    case GL_RG32F:
+    case GL_R32F:
+    case GL_R11F_G11F_B10F:
+    case GL_RGB9_E5:
+        return !g_gles_caps.GL_EXT_color_buffer_float;
+    default:
+        return false;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Temporary FBO pool for hot-path texture operations
@@ -108,6 +149,7 @@ extern "C" GLAPI GLAPIENTRY void glFramebufferTexture2D(GLenum target, GLenum at
         auto &att = GLState.framebuffer.attachments[currentFBO][attachment];
         att.fbo = currentFBO;
         att.attachment = attachment;
+        att.texture = texture;
     }
 }
 
@@ -123,6 +165,7 @@ extern "C" GLAPI GLAPIENTRY void glFramebufferTexture(GLenum target, GLenum atta
         auto &att = GLState.framebuffer.attachments[currentFBO][attachment];
         att.fbo = currentFBO;
         att.attachment = attachment;
+        att.texture = texture;
     }
 }
 
@@ -132,6 +175,19 @@ extern "C" GLAPI GLAPIENTRY void glFramebufferTexture(GLenum target, GLenum atta
 
 extern "C" GLAPI GLAPIENTRY void glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
     GLES.glFramebufferTextureLayer(target, attachment, texture, level, layer);
+
+    // Track attachment so glCheckFramebufferStatus can inspect the texture's
+    // internalformat when GLES reports INCOMPLETE_ATTACHMENT.
+    GLuint currentFBO = (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER)
+                        ? GLState.framebuffer.drawFBO
+                        : GLState.framebuffer.readFBO;
+
+    if (currentFBO) {
+        auto &att = GLState.framebuffer.attachments[currentFBO][attachment];
+        att.fbo = currentFBO;
+        att.attachment = attachment;
+        att.texture = texture;
+    }
 }
 
 // ============================================================================
@@ -157,15 +213,26 @@ extern "C" GLAPI GLAPIENTRY GLenum glCheckFramebufferStatus(GLenum target) {
     // UNSUPPORTED → COMPLETE so callers continue rendering instead of
     // aborting on a configuration that the desktop driver would have accepted.
     //
-    // Other incomplete statuses (INCOMPLETE_ATTACHMENT,
-    // INCOMPLETE_MISSING_ATTACHMENT, INCOMPLETE_DIMENSIONS,
-    // INCOMPLETE_MULTISAMPLE, UNDEFINED) indicate *real* configuration bugs
-    // (missing attachment, size mismatch, etc.) that would cause rendering
-    // into the FBO to silently fail in GLES. Returning the real status lets
-    // applications see the problem and fall back to a working path instead of
-    // rendering into a broken FBO (which manifests as a black screen, e.g.
-    // when Xaero's World Map allocates its region FBO with a configuration
-    // GLES actually rejects).
+    // GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT is similarly returned by many GLES
+    // drivers when a color attachment uses a float/half-float internalformat
+    // (RGBA16F, RGBA32F, R11F_G11F_B10F, ...) and the device lacks the
+    // GL_EXT_color_buffer_float / GL_EXT_color_buffer_half_float extension
+    // that makes those formats color-renderable. Desktop GL accepts these
+    // configurations as core since GL 3.0, and Iris shader packs rely on
+    // them for HDR render targets. When we can confirm via our attachment
+    // tracking that the incomplete status is caused by such a float format
+    // (and not by a real bug such as a missing texture or a dimension
+    // mismatch), promote to COMPLETE so Iris keeps its shader pipeline
+    // instead of disabling shaders and falling back to vanilla rendering.
+    //
+    // Other incomplete statuses (INCOMPLETE_MISSING_ATTACHMENT,
+    // INCOMPLETE_DIMENSIONS, INCOMPLETE_MULTISAMPLE, UNDEFINED) indicate
+    // *real* configuration bugs (missing attachment, size mismatch, etc.)
+    // that would cause rendering into the FBO to silently fail in GLES.
+    // Returning the real status lets applications see the problem and fall
+    // back to a working path instead of rendering into a broken FBO (which
+    // manifests as a black screen, e.g. when Xaero's World Map allocates its
+    // region FBO with a configuration GLES actually rejects).
     switch (status) {
         case GL_FRAMEBUFFER_COMPLETE:
             break;
@@ -173,6 +240,42 @@ extern "C" GLAPI GLAPIENTRY GLenum glCheckFramebufferStatus(GLenum target) {
             LOG_D("glCheckFramebufferStatus: promoting UNSUPPORTED -> COMPLETE (target=0x%X)", target);
             status = GL_FRAMEBUFFER_COMPLETE;
             break;
+        case GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT: {
+            // Look at every tracked attachment on the bound FBO. If any
+            // attached texture has a float internalformat whose required
+            // color-buffer extension is missing on this GLES driver, treat
+            // the incomplete status as a GLES limitation rather than a real
+            // configuration bug and promote to COMPLETE (matching desktop
+            // GL behaviour). Real bugs (no texture attached, dimension
+            // mismatch, etc.) fall through and return the real status.
+            GLuint currentFBO = (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER)
+                                ? GLState.framebuffer.drawFBO
+                                : GLState.framebuffer.readFBO;
+            bool promote = false;
+            if (currentFBO) {
+                auto fboIt = GLState.framebuffer.attachments.find(currentFBO);
+                if (fboIt != GLState.framebuffer.attachments.end()) {
+                    for (const auto& [attPoint, info] : fboIt->second) {
+                        if (info.texture == 0) continue;
+                        TextureObject* tex = mgGetTexObjectByID(info.texture);
+                        if (tex && float_color_format_needs_missing_ext(tex->internal_format)) {
+                            promote = true;
+                            LOG_D("glCheckFramebufferStatus: FBO %u attachment 0x%X uses float format %s "
+                                  "without required color_buffer extension; promoting",
+                                  currentFBO, attPoint, glEnumToString(tex->internal_format));
+                            break;
+                        }
+                    }
+                }
+            }
+            if (promote) {
+                status = GL_FRAMEBUFFER_COMPLETE;
+            } else {
+                LOG_E("glCheckFramebufferStatus: target=0x%X reports 0x%X (incomplete); returning real status",
+                      target, status);
+            }
+            break;
+        }
         default:
             LOG_E("glCheckFramebufferStatus: target=0x%X reports 0x%X (incomplete); returning real status",
                   target, status);
