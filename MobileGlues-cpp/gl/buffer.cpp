@@ -582,8 +582,9 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     int idx = binding_target_to_index(target);
     if (idx >= 0) {
         set_buffer_data_size(g_bound_buffers_arr[idx], size);
-        // Sync PBO shadow for GL_PIXEL_UNPACK_BUFFER.
-        if (target == GL_PIXEL_UNPACK_BUFFER) {
+        // Sync PBO shadow for GL_PIXEL_UNPACK_BUFFER. Use idx (already known)
+        // instead of re-checking target.
+        if (idx == BI_PIXEL_UNPACK) {
             pbo_shadow_alloc(g_bound_buffers_arr[idx], size, data);
         }
     }
@@ -594,10 +595,10 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void
     LOG()
     LOG_D("glBufferSubData, target = %s, offset = %d, size = %d, data = %p", glEnumToString(target), offset, size, data)
     GLES.glBufferSubData(target, offset, size, data);
-    // Sync PBO shadow for GL_PIXEL_UNPACK_BUFFER.
+    // Sync PBO shadow for GL_PIXEL_UNPACK_BUFFER. target is known at this
+    // point so index g_bound_buffers_arr directly (skip the switch).
     if (target == GL_PIXEL_UNPACK_BUFFER) {
-        int idx = binding_target_to_index(target);
-        if (idx >= 0) pbo_shadow_subdata(g_bound_buffers_arr[idx], offset, size, data);
+        pbo_shadow_subdata(g_bound_buffers_arr[BI_PIXEL_UNPACK], offset, size, data);
     }
     CHECK_GL_ERROR
 }

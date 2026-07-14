@@ -648,6 +648,7 @@ struct ScopedUnpackTight {
     GLint prevAlignment;
     GLint prevImageHeight;
     GLint prevSkipImages;
+    bool needsRestore;
 
     ScopedUnpackTight() {
         // Snapshot from the CPU-side cache maintained by our glPixelStorei()
@@ -664,19 +665,28 @@ struct ScopedUnpackTight {
         prevImageHeight = GLState.texture.unpackImageHeight;
         prevSkipImages  = GLState.texture.unpackSkipImages;
 
-        // GLES.glPixelStorei() here goes through the raw function-pointer
-        // table and bypasses our wrapper, so it does NOT touch GLState. That
-        // is intentional: GLState must keep holding the caller-visible values
-        // so that swizzle_pixels_for_unpack() (which reads GLState.texture.*)
-        // still computes the correct source stride during this scope.
-        GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-        GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        GLES.glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
+        // If the state is already tight (the common case when the app doesn't
+        // touch GL_UNPACK_* settings), skip the 6+6 glPixelStorei calls.
+        // 6 integer comparisons are significantly cheaper than 12 GLES driver
+        // calls on the hot texture-upload path.
+        needsRestore = (prevRowLength != 0 || prevSkipPixels != 0 || prevSkipRows != 0 ||
+                        prevAlignment != 1 || prevImageHeight != 0 || prevSkipImages != 0);
+        if (needsRestore) {
+            // GLES.glPixelStorei() here goes through the raw function-pointer
+            // table and bypasses our wrapper, so it does NOT touch GLState. That
+            // is intentional: GLState must keep holding the caller-visible values
+            // so that swizzle_pixels_for_unpack() (which reads GLState.texture.*)
+            // still computes the correct source stride during this scope.
+            GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+            GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+            GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            GLES.glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+            GLES.glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
+        }
     }
     ~ScopedUnpackTight() {
+        if (!needsRestore) return;
         // Restore GLES to the caller's state. Raw GLES.glPixelStorei() again
         // bypasses our wrapper, so GLState is untouched - which is correct:
         // GLState still holds the caller's values (== prevXxx), so after this
@@ -1145,10 +1155,14 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
         // swizzle to identity so sampling doesn't re-swap channels (Xaero
         // sets R=BLUE/B=RED on desktop GL to match its BGRA uploads, which
         // would double-swap the already-correct RGBA here).
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        // Skip if already identity (common on subsequent sub-image uploads),
+        // saving 4 GLES driver calls per swizzled upload.
+        if (!tex->bgraCpuSwizzled) [[likely]] {
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        }
         tex->bgraCpuSwizzled = true;
     } else {
         GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, uploadPixels);
@@ -1206,10 +1220,12 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
         // swizzle to identity so sampling doesn't re-swap channels (Xaero
         // sets R=BLUE/B=RED on desktop GL to match its BGRA uploads, which
         // would double-swap the already-correct RGBA here).
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        if (!tex->bgraCpuSwizzled) [[likely]] {
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        }
         tex->bgraCpuSwizzled = true;
     } else {
         GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, uploadPixels);
@@ -1250,10 +1266,12 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
         GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, uploadPixels);
         // CPU swizzle produced correct RGBA data. Force GLES-side texture
         // swizzle to identity so sampling doesn't re-swap channels.
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        if (tex && !tex->bgraCpuSwizzled) [[likely]] {
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        }
         if (tex) tex->bgraCpuSwizzled = true;
     } else {
         GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, uploadPixels);
@@ -1287,10 +1305,12 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
         GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, uploadPixels);
         // CPU swizzle produced correct RGBA data. Force GLES-side texture
         // swizzle to identity so sampling doesn't re-swap channels.
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
-        GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        if (tex && !tex->bgraCpuSwizzled) [[likely]] {
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_RED);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+            GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+        }
         if (tex) tex->bgraCpuSwizzled = true;
     } else {
         GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, uploadPixels);
