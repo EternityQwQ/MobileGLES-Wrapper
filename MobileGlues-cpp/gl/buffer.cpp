@@ -69,12 +69,19 @@ static std::mutex g_pbo_shadow_mutex;
 void pbo_shadow_alloc(GLuint pbo, GLsizeiptr size, const void* data) {
     if (pbo == 0) return;
     std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
-    auto& s = g_pbo_shadows[pbo];
-    s.data.resize(size);
-    s.mapped = false;
+    // try_emplace: single hash lookup that finds-or-inserts (one fewer hash
+    // than operator[], which default-constructs then is overwritten).
+    auto [it, inserted] = g_pbo_shadows.try_emplace(pbo);
+    auto& s = it->second;
     if (data && size > 0) {
-        memcpy(s.data.data(), data, size);
+        // assign() does resize + copy in one pass (avoids zero-fill by resize
+        // then immediate overwrite by memcpy).
+        s.data.assign(static_cast<const unsigned char*>(data),
+                      static_cast<const unsigned char*>(data) + size);
+    } else {
+        s.data.resize(size);
     }
+    s.mapped = false;
 }
 
 void pbo_shadow_subdata(GLuint pbo, GLintptr offset, GLsizeiptr size, const void* data) {
@@ -171,11 +178,10 @@ void* pbo_shadow_ensure_and_map_write(GLuint pbo, GLintptr offset, GLsizeiptr le
     if (pbo == 0 || length <= 0) return nullptr;
     if (offset < 0) offset = 0;
     std::lock_guard<std::mutex> lock(g_pbo_shadow_mutex);
-    auto it = g_pbo_shadows.find(pbo);
-    if (it == g_pbo_shadows.end()) {
-        // Lazily allocate the shadow the way pbo_shadow_alloc() would.
-        it = g_pbo_shadows.emplace(pbo, PboShadow{}).first;
-    }
+    // try_emplace: single hash lookup that finds-or-inserts. The previous
+    // find() + emplace() sequence did two hash lookups; this collapses them
+    // into one on the hot texture-upload path.
+    auto [it, inserted] = g_pbo_shadows.try_emplace(pbo);
     auto& s = it->second;
     if (offset + length > (GLsizeiptr)s.data.size()) {
         s.data.resize(offset + length);
@@ -637,19 +643,19 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
     // variance; collapsing them into one critical section stabilises the
     // upload path.
     if (target == GL_PIXEL_UNPACK_BUFFER && (access & GL_MAP_WRITE_BIT)) {
-        int idx = binding_target_to_index(target);
-        if (idx >= 0) {
-            GLuint pbo = g_bound_buffers_arr[idx];
-            if (pbo != 0) {
-                void* shadowPtr = pbo_shadow_ensure_and_map_write(pbo, offset, length);
-                if (shadowPtr) {
-                    // Still map GLES buffer for write so the data lands in
-                    // the real buffer too (for non-texture reads of PBO).
-                    // Use GL_MAP_WRITE_BIT only (no INVALIDATE since we
-                    // preserve shadow). Actually, we don't need GLES mapping
-                    // at all if we sync via glBufferSubData on unmap.
-                    return shadowPtr;
-                }
+        // target == GL_PIXEL_UNPACK_BUFFER implies binding_target_to_index()
+        // returns BI_PIXEL_UNPACK (never -1), so skip the switch and index the
+        // binding table directly on this hot path.
+        GLuint pbo = g_bound_buffers_arr[BI_PIXEL_UNPACK];
+        if (pbo != 0) [[likely]] {
+            void* shadowPtr = pbo_shadow_ensure_and_map_write(pbo, offset, length);
+            if (shadowPtr) [[likely]] {
+                // Still map GLES buffer for write so the data lands in
+                // the real buffer too (for non-texture reads of PBO).
+                // Use GL_MAP_WRITE_BIT only (no INVALIDATE since we
+                // preserve shadow). Actually, we don't need GLES mapping
+                // at all if we sync via glBufferSubData on unmap.
+                return shadowPtr;
             }
         }
     }
@@ -672,22 +678,22 @@ GLboolean glUnmapBuffer(GLenum target) {
     // frame-time variance; collapsing them into one critical section
     // stabilises the upload path.
     if (target == GL_PIXEL_UNPACK_BUFFER) {
-        int idx = binding_target_to_index(target);
-        if (idx >= 0) {
-            GLuint pbo = g_bound_buffers_arr[idx];
-            if (pbo != 0) {
-                const unsigned char* shadowBase = nullptr;
-                GLintptr mapOffset = 0;
-                GLsizeiptr mapLength = 0;
-                if (pbo_shadow_unmap_and_get_range(pbo, &shadowBase, &mapOffset, &mapLength)) {
-                    if (shadowBase && mapLength > 0) {
-                        GLES.glBufferSubData(target, mapOffset, mapLength,
-                                              shadowBase + mapOffset);
-                    }
+        // target == GL_PIXEL_UNPACK_BUFFER implies binding_target_to_index()
+        // returns BI_PIXEL_UNPACK (never -1), so skip the switch and index the
+        // binding table directly on this hot path.
+        GLuint pbo = g_bound_buffers_arr[BI_PIXEL_UNPACK];
+        if (pbo != 0) [[likely]] {
+            const unsigned char* shadowBase = nullptr;
+            GLintptr mapOffset = 0;
+            GLsizeiptr mapLength = 0;
+            if (pbo_shadow_unmap_and_get_range(pbo, &shadowBase, &mapOffset, &mapLength)) [[likely]] {
+                if (shadowBase && mapLength > 0) {
+                    GLES.glBufferSubData(target, mapOffset, mapLength,
+                                          shadowBase + mapOffset);
                 }
-                CHECK_GL_ERROR
-                return GL_TRUE;
             }
+            CHECK_GL_ERROR
+            return GL_TRUE;
         }
     }
     if (g_gles_caps.GL_OES_mapbuffer) return GLES.glUnmapBuffer(target);
