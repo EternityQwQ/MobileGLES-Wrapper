@@ -21,6 +21,12 @@ extern void* g_loader_handle;
 // ============================================================================
 // Backward-compatible #define macros for old code
 // ============================================================================
+// NOTE: Removed legacy aliases that had no remaining callers in the codebase:
+//   current_program, current_tex_unit, is_draw_call, buffer_map*,
+//   vao_map*, texture_map*, fbo_map*, shader_map*, program_map*,
+//   buffer_info, getReal*/getVirtual* inline helpers, FUNC_GL_STATE_* /
+//   GET_GL_STATE_* setter/getter macros. The retained aliases below are
+//   still used by texture.cpp / getter.cpp / ExtWrappers / framebuffer.h.
 
 // Old state variable aliases (pointer-style for backward compat)
 #define gl_state         (&GLState)
@@ -28,32 +34,8 @@ extern void* g_loader_handle;
 #define proxy_width      proxyWidth
 #define proxy_height     proxyHeight
 #define proxy_intformat  proxyInternalFormat
-#define current_program  currentProgram
-#define current_tex_unit currentTexUnit
 #define current_draw_fbo GLState.currentDrawFBO
 #define current_read_fbo GLState.framebuffer.readFBO
-#define is_draw_call     GLState.isDrawCall
-
-// Old buffer map aliases
-#define buffer_map          GLState.buffer.bufferMap
-#define buffer_map_remove   GLState.buffer.bufferMapReverse
-#define vao_map             GLState.buffer.vaoMap
-#define vao_map_remove      GLState.buffer.vaoMapReverse
-#define buffer_info         GLState.buffer.bufferInfo
-
-// Old texture map aliases
-#define texture_map         GLState.texture.textureMap
-#define texture_map_remove  GLState.texture.textureMapReverse
-
-// Old FBO map aliases
-#define fbo_map             GLState.framebuffer.fboMap
-#define fbo_map_remove      GLState.framebuffer.fboMapReverse
-
-// Old shader/program map aliases
-#define shader_map          GLState.shader.shaderMap
-#define shader_map_remove   GLState.shader.shaderMapReverse
-#define program_map         GLState.shader.programMap
-#define program_map_remove  GLState.shader.programMapReverse
 
 // Old format conversion aliases (inline functions to avoid macro collisions)
 inline GLenum CheckTextureTarget(GLenum target) { return GLStateManager::ConvertTextureTarget(target); }
@@ -95,62 +77,8 @@ inline GLenum map_tex_target(GLenum target) {
     }
 }
 
-// Old state setter macros → direct assignments
-#define FUNC_GL_STATE_SIZEI(name, value) \
-    do { GLState.name = (value); STATE_LOG(#name " = %d", (int)(value)); } while (0)
-
-#define FUNC_GL_STATE_ENUM(name, value) \
-    do { GLState.name = (value); STATE_LOG(#name " = 0x%X", (unsigned)(value)); } while (0)
-
-#define FUNC_GL_STATE_UINT(name, value) \
-    do { GLState.name = (value); STATE_LOG(#name " = %u", (unsigned)(value)); } while (0)
-
-// Convenience: getter for state values
-#define GET_GL_STATE_SIZEI(name)    GLState.name
-#define GET_GL_STATE_ENUM(name)     GLState.name
-#define GET_GL_STATE_UINT(name)     GLState.name
-
-// ============================================================================
-// Utility: get real GLES ID from virtual ID
-// ============================================================================
-
-// ============================================================================
-// Utility: get real GLES ID from virtual ID (inline, direct map access)
-// ============================================================================
-
-inline GLuint getRealBuffer(GLuint virtualId) {
-    return GLState.buffer.bufferMap.lookup(virtualId);
-}
-
-inline GLuint getVirtualBuffer(GLuint realId) {
-    auto it = GLState.buffer.bufferMapReverse.find(realId);
-    return (it != GLState.buffer.bufferMapReverse.end()) ? it->second : 0;
-}
-
-inline GLuint getRealTexture(GLuint virtualId) {
-    return GLState.texture.textureMap.lookup(virtualId);
-}
-
-inline GLuint getVirtualTexture(GLuint realId) {
-    auto it = GLState.texture.textureMapReverse.find(realId);
-    return (it != GLState.texture.textureMapReverse.end()) ? it->second : 0;
-}
-
-inline GLuint getRealFBO(GLuint virtualId) {
-    return GLState.framebuffer.fboMap.lookup(virtualId);
-}
-
-inline GLuint getRealVAO(GLuint virtualId) {
-    return GLState.buffer.vaoMap.lookup(virtualId);
-}
-
-inline GLuint getRealProgram(GLuint virtualId) {
-    return GLState.shader.programMap.lookup(virtualId);
-}
-
-inline GLuint getRealShader(GLuint virtualId) {
-    return GLState.shader.shaderMap.lookup(virtualId);
-}
+// Old state setter/getter macros (FUNC_GL_STATE_*, GET_GL_STATE_*) removed:
+// no remaining callers; direct field access is used everywhere instead.
 
 // ============================================================================
 // New: RenderState version accessor (for backend dirty-tracking)

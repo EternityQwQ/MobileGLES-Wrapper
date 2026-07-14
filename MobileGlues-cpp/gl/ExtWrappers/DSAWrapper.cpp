@@ -129,7 +129,7 @@ void glNamedBufferStorage(GLuint buffer, GLsizeiptr size, const void* data, GLbi
 
     if (buffer == 0 || size <= 0) {
         LOG_W("[DSA] Invalid parameters for glNamedBufferStorage");
-        // return;
+        return;
     }
 
     temporarilyBindBuffer(buffer);
@@ -154,7 +154,7 @@ void glNamedBufferData(GLuint buffer, GLsizeiptr size, const void* data, GLenum 
 
     if (buffer == 0 || size <= 0) {
         LOG_W("[DSA] Invalid parameters for glNamedBufferData");
-        // return;
+        return;
     }
 
     temporarilyBindBuffer(buffer);
@@ -174,7 +174,7 @@ void glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const
 
     if (buffer == 0 || size <= 0 || offset < 0) {
         LOG_W("[DSA] Invalid parameters for glNamedBufferSubData");
-        // return;
+        return;
     }
     temporarilyBindBuffer(buffer);
     glBufferSubData(GL_ARRAY_BUFFER, offset, size, data);
@@ -196,7 +196,7 @@ void glCopyNamedBufferSubData(GLuint readBuffer, GLuint writeBuffer, GLintptr re
 
     if (readBuffer == 0 || writeBuffer == 0 || size <= 0 || readOffset < 0 || writeOffset < 0) {
         LOG_W("[DSA] Invalid parameters for glCopyNamedBufferSubData");
-        // return;
+        return;
     }
     temporarilyBindBuffer(readBuffer, GL_COPY_READ_BUFFER);
     temporarilyBindBuffer(writeBuffer, GL_COPY_WRITE_BUFFER);
@@ -214,7 +214,7 @@ void glClearNamedBufferData(GLuint buffer, GLenum internalformat, GLenum format,
 
     if (buffer == 0) {
         LOG_W("[DSA] Invalid buffer ID for glClearNamedBufferData");
-        // return;
+        return;
     }
     temporarilyBindBuffer(buffer);
     glClearBufferData(GL_ARRAY_BUFFER, internalformat, format, type, data);
@@ -233,7 +233,7 @@ void glClearNamedBufferSubData(GLuint buffer, GLenum internalformat, GLintptr of
 
     if (buffer == 0 || size <= 0 || offset < 0) {
         LOG_W("[DSA] Invalid parameters for glClearNamedBufferSubData");
-        // return;
+        return;
     }
     temporarilyBindBuffer(buffer);
     glClearBufferSubData(GL_ARRAY_BUFFER, internalformat, offset, size, format, type, data);

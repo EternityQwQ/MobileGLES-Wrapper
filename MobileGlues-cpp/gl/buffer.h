@@ -60,6 +60,19 @@ extern "C"
     // to flush the shadow back to GLES.
     void* pbo_shadow_map_write(GLuint pbo, GLintptr offset, GLsizeiptr length);
     void pbo_shadow_unmap(GLuint pbo);
+    // Combined hot-path: ensure the shadow exists (lazily allocating if needed)
+    // and write-map it in a single locked lookup. Replaces the previous 3-lock
+    // sequence (pbo_shadow_get + pbo_shadow_alloc + pbo_shadow_map_write) in
+    // glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, GL_MAP_WRITE_BIT). Reduces
+    // lock-acquisition jitter on contended texture-upload paths, which matters
+    // for frame-time stability under high CPU load.
+    void* pbo_shadow_ensure_and_map_write(GLuint pbo, GLintptr offset, GLsizeiptr length);
+    // Combined hot-path: snapshot the write-mapped range and clear the mapped
+    // flag in a single locked lookup. Replaces the previous 2-lock sequence
+    // (pbo_shadow_get_mapped_range + pbo_shadow_unmap) in
+    // glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER).
+    bool pbo_shadow_unmap_and_get_range(GLuint pbo, const unsigned char** outData,
+                                         GLintptr* outOffset, GLsizeiptr* outLength);
 
     // --- Thread-local scratch buffer cache ---
     // Texture-upload swizzle path needs a tight temporary buffer per upload
