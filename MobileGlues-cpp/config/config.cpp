@@ -121,6 +121,15 @@ char* config_get_string(char* name) {
     return item->valuestring;
 }
 
+bool config_has_key(const char* name) {
+    if (config_json == NULL) {
+        return false;
+    }
+
+    cJSON* item = cJSON_GetObjectItem(config_json, name);
+    return item != NULL && cJSON_IsNumber(item);
+}
+
 void config_cleanup() {
     if (config_json != NULL) {
         cJSON_Delete(config_json);
