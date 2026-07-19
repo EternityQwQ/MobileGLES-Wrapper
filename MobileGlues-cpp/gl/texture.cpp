@@ -254,14 +254,13 @@ static inline __attribute__((always_inline)) void ActivateTextureUnit(int unit) 
     CurrentTextureUnitIndex = unit;
 }
 
-static inline __attribute__((always_inline)) int GetCurrentTextureUnitIndex() {
+inline __attribute__((always_inline)) int GetCurrentTextureUnitIndex() {
     return CurrentTextureUnitIndex;
 }
 
-// Marked static so the compiler knows these have internal linkage and
-// can be inlined into the glBindTexture / MarkTextureObjectForDeletion
+// Marked inline so the compiler can inline into the glBindTexture / MarkTextureObjectForDeletion
 // hot paths without a cross-TU call.
-static inline __attribute__((always_inline)) TextureUnit& GetTextureUnit(int unit) {
+inline __attribute__((always_inline)) TextureUnit& GetTextureUnit(int unit) {
     if (unit < 0 || unit >= MAX_TEXTURE_IMAGE_UNITS) {
         LOG_E("Invalid texture unit: %d", unit);
         return TextureUnits[0];
@@ -291,13 +290,13 @@ void MarkTextureObjectForDeletion(unsigned texture) {
     delete textureObject;
 }
 
-static inline __attribute__((always_inline)) TextureObject* mgGetTexObjectByTarget(GLenum target) {
+inline __attribute__((always_inline)) TextureObject* mgGetTexObjectByTarget(GLenum target) {
     return GetTextureUnit(GetCurrentTextureUnitIndex())
         .GetBindingSlot(ConvertGLEnumToTextureTarget(target))
         .GetBoundObject();
 }
 
-static inline __attribute__((always_inline)) TextureObject* mgGetTexObjectByID(unsigned texture) {
+inline __attribute__((always_inline)) TextureObject* mgGetTexObjectByID(unsigned texture) {
     if (texture >= BufferObjectsVec.size() || !BufferObjectsVec[texture]) {
         LOG_E("Texture %u not found in BufferObjectsVec!", texture);
         return nullptr;
