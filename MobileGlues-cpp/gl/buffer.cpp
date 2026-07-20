@@ -328,7 +328,7 @@ static inline __attribute__((always_inline)) std::pair<GLuint, bool> find_real_b
 bool g_atomicCountersActive = false;
 
 #include "state.h"
-static inline __attribute__((always_inline)) void mg_update_atomic_counters_active_flag() {
+inline __attribute__((always_inline)) void mg_update_atomic_counters_active_flag() {
     auto &bs = GLState.buffer;
     g_atomicCountersActive = (bs.atomicCounterBufferBinding != 0) && !bs.atomicCounterData.empty();
 }
@@ -337,16 +337,16 @@ static inline __attribute__((always_inline)) void mg_update_atomic_counters_acti
 // has already verified the buffer exists (e.g. after find_real_buffer_with_exists).
 // Avoids redundant ensure_buffer_capacity in hot paths like glBindBuffer,
 // glBindBufferRange, glBindBufferBase, glBindVertexBuffer, glTexBuffer.
-static inline __attribute__((always_inline)) void modify_buffer_direct(GLuint key, GLuint value) {
+inline __attribute__((always_inline)) void modify_buffer_direct(GLuint key, GLuint value) {
     g_gen_buffers[key] = value;
 }
 
-static inline __attribute__((always_inline)) GLuint get_ibo_by_vao(GLuint vao) {
+inline __attribute__((always_inline)) GLuint get_ibo_by_vao(GLuint vao) {
     if (vao < g_element_array_buffer_per_vao.size()) return g_element_array_buffer_per_vao[vao];
     return 0;
 }
 
-static inline __attribute__((always_inline)) GLuint find_bound_array() {
+inline __attribute__((always_inline)) GLuint find_bound_array() {
     return bound_array;
 }
 
@@ -388,12 +388,12 @@ static inline int binding_target_to_index(GLenum target) {
     }
 }
 
-static inline __attribute__((always_inline)) void set_bound_buffer_by_target(GLenum target, GLuint buffer) {
+inline __attribute__((always_inline)) void set_bound_buffer_by_target(GLenum target, GLuint buffer) {
     int idx = binding_target_to_index(target);
     if (idx >= 0) g_bound_buffers_arr[idx] = buffer;
 }
 
-static inline __attribute__((always_inline)) GLuint find_bound_buffer(GLenum key) {
+inline __attribute__((always_inline)) GLuint find_bound_buffer(GLenum key) {
     // Special case: ELEMENT_ARRAY_BUFFER uses VAO tracking
     if (key == GL_ELEMENT_ARRAY_BUFFER_BINDING) {
         return get_ibo_by_vao(find_bound_array());
