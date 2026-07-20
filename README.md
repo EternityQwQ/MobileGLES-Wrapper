@@ -1,10 +1,12 @@
-# MobileGlues
+# MobileGLES
 
-**MobileGlues**, which stands for "(on) Mobile, GL uses ES", is a GL implementation running on top of host OpenGL ES 3.x (best on 3.2, minimum 3.0), with running Minecraft: Java Edition in mind.
+**MobileGLES** is the iOS-only fork of MobileGlues ("(on) Mobile, GL uses ES"). It is a GL implementation running on top of host OpenGL ES 3.x (best on 3.2, minimum 3.0), with running Minecraft: Java Edition in mind.
+
+> **Platform scope**: MobileGLES targets **iOS exclusively**. It refuses to build or run on any other platform (Android, Linux, macOS desktop, Windows). It relies on the prebuilt ANGLE frameworks (`libEGL.framework`, `libGLESv2.framework`) built atop Metal, which are statically linked into the host application.
 
 # For Shader Developers
 
-1. MobileGlues automatically:
+1. MobileGLES automatically:
    - Converts desktop GLSL → GLSL ES
    - Removes `layout(binding)` syntax
    - Handles version directives
@@ -14,33 +16,20 @@
      precision highp int;
      ```
 
-2. MobileGlues (since V1.2.6) injects these macros into your shaders:
+2. MobileGLES injects these macros into your shaders:
    ```glsl
-   #define MG_MOBILEGLUES                   // Indicates MobileGlues environment
-   #define MG_MOBILEGLUES_VERSION 1260      // Version number (e.g. 1260 = V1.2.6)
-   ```
-
-   Use these macros for platform-specific logic:
-   ```glsl
-   #ifdef MG_MOBILEGLUES
-       #if MG_MOBILEGLUES_VERSION >= 1270
-           // Logic for MobileGlues (version >= V1.2.7)
-       #else
-           // Logic for MobileGlues (version < V1.2.7)
-       #endif
-   #else
-       // ...
-   #endif
+   #define MG_MOBILEGLES                   // Indicates MobileGLES environment
+   #define MG_MOBILEGLES_VERSION 1000      // Version number (e.g. 1000 = V1.0.0)
    ```
 
 3. If encountering issues:
-   - Enable `Ignore shader/program error`, and check the logs (located at `/sdcard/MG/latest.log`).
+   - Enable `Ignore shader/program error`, and check the logs (located at `$HOME/Documents/MG/latest.log` inside the iOS app container).
 
 # License
 
-MobileGlues is licensed under **GNU LGPL-2.1 License**.
+MobileGLES is licensed under **GNU LGPL-2.1 License**.
 
-Please see [LICENSE](https://github.com/MobileGL-Dev/MobileGlues/blob/main/LICENSE).
+Please see [LICENSE](https://github.com/MobileGL-Dev/MobileGLES/blob/main/LICENSE).
 
 # Third-party components
 
@@ -52,8 +41,8 @@ Please see [LICENSE](https://github.com/MobileGL-Dev/MobileGlues/blob/main/LICEN
 
 **OpenGL Mathematics (*GLM*)** by **G-Truc Creation** - [The Happy Bunny License](https://github.com/g-truc/glm/blob/master/copying.txt): [github](https://github.com/g-truc/glm)
 
-**FidelityFX-FSR** by **AMD** - [MIT License](https://github.com/GPUOpen-Effects/FidelityFX-FSR/blob/master/license.txt): [github](https://github.com/GPUOpen-Effects/FidelityFX-FSR) 
-
-**Perfetto** by **Google** - [Apache License 2.0](https://github.com/google/perfetto/blob/main/LICENSE): [github](https://github.com/google/perfetto)
+**FidelityFX-FSR** by **AMD** - [MIT License](https://github.com/GPUOpen-Effects/FidelityFX-FSR/blob/master/license.txt): [github](https://github.com/GPUOpen-Effects/FidelityFX-FSR)
 
 **xxHash** by **Yann Collet** - [BSD 2-Clause License](https://github.com/Cyan4973/xxHash/blob/dev/LICENSE): [github](https://github.com/Cyan4973/xxHash)
+
+**ANGLE** by **Google** - [BSD 3-Clause License](https://chromium.googlesource.com/angle/angle/+/refs/heads/main/LICENSE): [chromium](https://chromium.googlesource.com/angle/angle/)

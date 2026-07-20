@@ -1,4 +1,4 @@
-// MobileGlues - gl/mg.cpp
+// MobileGLES - gl/mg.cpp
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -22,58 +22,20 @@ FUNC_GL_STATE_UINT(current_program)
 FUNC_GL_STATE_UINT(current_tex_unit)
 FUNC_GL_STATE_UINT(current_draw_fbo)
 
-#ifndef __APPLE__
-FILE* file;
-#endif
-
 void start_log() {
-#ifndef __APPLE__
-    file = fopen(log_file_path, "a");
-#endif
+    // iOS: logging to file is a no-op (uses OS log instead).
 }
 
 void write_log(const char* format, ...) {
-#ifndef __APPLE__
-    if (file == nullptr) {
-        return;
-    }
-    va_list args;
-    va_start(args, format);
-    vfprintf(file, format, args);
-    va_end(args);
-    fprintf(file, "\n");
-    fflush(file);
-#if FORCE_SYNC_WITH_LOG_FILE == 1
-    int fd = fileno(file);
-    fsync(fd);
-#endif
-    // Todo: close file
-    // fclose(file);
-#endif
+    // iOS: no-op
 }
 
 void write_log_n(const char* format, ...) {
-#ifndef __APPLE__
-    if (file == NULL) {
-        return;
-    }
-    va_list args;
-    va_start(args, format);
-    vfprintf(file, format, args);
-    va_end(args);
-    // Todo: close file
-    fflush(file);
-#endif
+    // iOS: no-op
 }
 
 void clear_log() {
-#ifndef __APPLE__
-    file = fopen(log_file_path, "w");
-    if (file == nullptr) {
-        return;
-    }
-    fclose(file);
-#endif
+    // iOS: no-op
 }
 
 GLenum pname_convert(GLenum pname) {

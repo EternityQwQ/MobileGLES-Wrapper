@@ -1,12 +1,12 @@
-// MobileGlues - gl/drawing.h
+// MobileGLES - gl/drawing.h
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
-#ifndef MOBILEGLUES_DRAWING_H
-#define MOBILEGLUES_DRAWING_H
+#ifndef MOBILEGLES_DRAWING_H
+#define MOBILEGLES_DRAWING_H
 
 #include <dlfcn.h>
 #include <cstdio>
@@ -50,4 +50,4 @@ extern "C"
 }
 #endif
 
-#endif // MOBILEGLUES_DRAWING_H
+#endif // MOBILEGLES_DRAWING_H

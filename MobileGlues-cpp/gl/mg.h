@@ -1,25 +1,17 @@
-// MobileGlues - gl/mg.h
+// MobileGLES - gl/mg.h
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
-#ifndef MOBILEGLUES_MG_H
-#define MOBILEGLUES_MG_H
+#ifndef MOBILEGLES_MG_H
+#define MOBILEGLES_MG_H
 
 typedef unsigned int uint;
 
 #include <cstring>
 #include <cstdlib>
-
-#ifndef __APPLE__
-#include <malloc.h>
-#endif
-
-#ifdef __ANDROID__
-#include <android/log.h>
-#endif
 
 #include <GL/gl.h>
 #include "../gles/gles.h"
@@ -92,4 +84,4 @@ extern "C"
 
 void prepareForDraw();
 
-#endif // MOBILEGLUES_MG_H
+#endif // MOBILEGLES_MG_H

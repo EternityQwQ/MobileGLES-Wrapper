@@ -1,11 +1,11 @@
-// MobileGlues - gl/log.h
+// MobileGLES - gl/log.h
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
-#ifndef MOBILEGLUES_LOG_H
+#ifndef MOBILEGLES_LOG_H
 
 #include "../includes.h"
 
@@ -26,8 +26,7 @@ extern "C"
 }
 #endif
 
-#ifndef __ANDROID__
-// Define a stub for __android_log_print if not on Android
+// iOS doesn't have <android/log.h>; define a no-op stub.
 #define ANDROID_LOG_UNKNOWN 0
 #define ANDROID_LOG_DEFAULT 1
 #define ANDROID_LOG_VERBOSE 2
@@ -41,7 +40,6 @@ extern "C"
 typedef int android_LogPriority;
 
 int __android_log_print(int prio, const char* tag, const char* fmt, ...);
-#endif
 
 #if GLOBAL_DEBUG_FORCE_OFF
 #define LOG()                                                                                                          \
@@ -137,6 +135,6 @@ void log_unique_function(const char* func_name);
         write_log(__VA_ARGS__);                                                                                        \
     }
 
-#define MOBILEGLUES_LOG_H
+#define MOBILEGLES_LOG_H
 
-#endif // MOBILEGLUES_LOG_H
+#endif // MOBILEGLES_LOG_H

@@ -1,4 +1,4 @@
-name: Build MobileGlues for iOS
+name: Build MobileGLES for iOS
 on: [push, workflow_dispatch]
 jobs:
   build-ios:
@@ -9,7 +9,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build MobileGlues
+      - name: Build MobileGLES
         run: |
           cd MobileGlues-cpp
           wget https://github.com/leetal/ios-cmake/raw/master/ios.toolchain.cmake
@@ -19,11 +19,11 @@ jobs:
             -DMACOS=ON \
             -DPLATFORM=OS64 \
             -DCMAKE_C_FLAGS=-Wno-error=implicit-function-declaration
-          cmake --build build --config RelWithDebInfo --target mobileglues
-          codesign -s - build/libmobileglues.dylib
+          cmake --build build --config RelWithDebInfo --target mobilegles
+          codesign -s - build/libmobilegles.dylib
 
       - name: Upload lib
         uses: actions/upload-artifact@v4
         with:
-          name: MobileGlues-iOS-dylib
-          path: /Users/runner/work/MobileGlues/MobileGlues/MobileGlues-cpp/build
+          name: MobileGLES-iOS-dylib
+          path: /Users/runner/work/MobileGLES/MobileGLES/MobileGlues-cpp/build

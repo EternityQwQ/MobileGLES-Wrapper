@@ -1,4 +1,4 @@
-// MobileGlues - egl/loader.cpp
+// MobileGLES - egl/loader.cpp
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -122,17 +122,4 @@ cleanup:
         egl_eglTerminate(eglDisplay);
     }
     LOG_E("EGL initialization failed");
-}
-
-void destroy_temp_egl_ctx() {
-    LOAD_EGL(eglDestroySurface);
-    LOAD_EGL(eglDestroyContext);
-    LOAD_EGL(eglMakeCurrent);
-    LOAD_EGL(eglTerminate);
-
-    egl_eglMakeCurrent(eglDisplay, 0, 0, EGL_NO_CONTEXT);
-    egl_eglDestroySurface(eglDisplay, eglSurface);
-    egl_eglDestroyContext(eglDisplay, eglContext);
-
-    egl_eglTerminate(eglDisplay);
 }

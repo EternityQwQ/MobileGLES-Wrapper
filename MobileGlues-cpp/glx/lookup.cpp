@@ -1,4 +1,4 @@
-// MobileGlues - glx/lookup.cpp
+// MobileGLES - glx/lookup.cpp
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -54,21 +54,10 @@ std::string handle_multidraw_func_name(std::string name) {
 void* glXGetProcAddress(const char* name) {
     LOG()
     std::string real_func_name = handle_multidraw_func_name(std::string(name));
-#ifdef __APPLE__
+    // iOS: ANGLE frameworks are statically linked into the main image, so
+    // resolve symbols via the RTLD_MAIN_ONLY pseudo-handle (computed as
+    // (void*)(~(uintptr_t)0)).
     return dlsym((void*)(~(uintptr_t)0), real_func_name.c_str());
-#else
-
-    void* proc = nullptr;
-
-    proc = dlsym(RTLD_DEFAULT, real_func_name.c_str());
-
-    if (!proc) {
-        LOG_W("Failed to get OpenGL function: %s", real_func_name.c_str())
-        return nullptr;
-    }
-
-    return proc;
-#endif
 }
 
 void* glXGetProcAddressARB(const char* name) {

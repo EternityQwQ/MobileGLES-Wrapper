@@ -1,4 +1,4 @@
-// MobileGlues - gl/getter.cpp
+// MobileGLES - gl/getter.cpp
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -113,7 +113,7 @@ void InitGLESBaseExtensions() {
     std::vector<std::string> extensions;
 
     if (global_settings.hide_mg_env_level == HideMGEnvLevel::Disabled) {
-        extensions.push_back("GL_MG_mobileglues");
+        extensions.push_back("GL_MG_mobilegles");
         extensions.push_back("GL_MG_backend_string_getter_access");
         extensions.push_back("GL_MG_settings_string_dump");
     }
@@ -268,10 +268,10 @@ const GLubyte* glGetString(GLenum name) {
             versionString = GLVersion.toString();
             if (global_settings.hide_mg_env_level == HideMGEnvLevel::Disabled) {
                 if (GLVersion.toInt(2) == DEFAULT_GL_VERSION) {
-                    versionString += " MobileGlues ";
+                    versionString += " MobileGLES ";
                 } else {
                     Version defaultVersion = Version(DEFAULT_GL_VERSION);
-                    versionString += " §4§l(" + defaultVersion.toString() + ") MobileGlues§r ";
+                    versionString += " §4§l(" + defaultVersion.toString() + ") MobileGLES§r ";
                 }
 
                 versionString += std::to_string(MAJOR) + "." + std::to_string(MINOR) + "." + std::to_string(REVISION);
@@ -374,20 +374,14 @@ const GLubyte* glGetString(GLenum name) {
                     shadingLangString += GenerateRandomString(junkOpts);
                 }
             } else {
-                shadingLangString = baseVer + " MobileGlues with glslang and SPIRV-Cross";
+                shadingLangString = baseVer + " MobileGLES with glslang and SPIRV-Cross";
             }
         }
 
         return reinterpret_cast<const GLubyte*>(shadingLangString.c_str());
     }
     case GL_EXTENSIONS: {
-#if !defined(__APPLE__)
-        static std::string cached;
-        cached = GetExtensionsList();
-        return (const GLubyte*)cached.c_str();
-#else
         return (const GLubyte*)GetExtensionsList().c_str();
-#endif
     }
     case GL_SETTINGS_MG: {
         if (global_settings.hide_mg_env_level >= HideMGEnvLevel::Level1) return GLES.glGetString(name);

@@ -1,12 +1,12 @@
-// MobileGlues - gl/pixel.h
+// MobileGLES - gl/pixel.h
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
-#ifndef MOBILEGLUES_PIXEL_H
-#define MOBILEGLUES_PIXEL_H
+#ifndef MOBILEGLES_PIXEL_H
+#define MOBILEGLES_PIXEL_H
 
 #include <GL/gl.h>
 #include "../gles/gles.h"
@@ -41,4 +41,4 @@ GLboolean is_type_packed(GLenum type);
 bool pixel_convert(const GLvoid* src, GLvoid** dst, GLuint width, GLuint height, GLenum src_format, GLenum src_type,
                    GLenum dst_format, GLenum dst_type, GLuint stride, GLuint align);
 
-#endif // MOBILEGLUES_PIXEL_H
+#endif // MOBILEGLES_PIXEL_H

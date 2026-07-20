@@ -1,4 +1,4 @@
-// MobileGlues - gl/getter.h
+// MobileGLES - gl/getter.h
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -14,8 +14,8 @@
 #include "mg.h"
 #include "../version.h"
 
-#ifndef MOBILEGLUES_GETTER_H
-#define MOBILEGLUES_GETTER_H
+#ifndef MOBILEGLES_GETTER_H
+#define MOBILEGLES_GETTER_H
 
 #ifdef __cplusplus
 extern "C"
@@ -39,4 +39,4 @@ extern "C"
 
 extern Version GLVersion;
 
-#endif // MOBILEGLUES_GETTER_H
+#endif // MOBILEGLES_GETTER_H

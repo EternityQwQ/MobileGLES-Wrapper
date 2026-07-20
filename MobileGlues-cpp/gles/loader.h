@@ -1,11 +1,11 @@
-// MobileGlues - gles/loader.h
+// MobileGLES - gles/loader.h
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
-#ifndef MOBILEGLUES_GLES_LOADER_H_
-#define MOBILEGLUES_GLES_LOADER_H_
+#ifndef MOBILEGLES_GLES_LOADER_H_
+#define MOBILEGLES_GLES_LOADER_H_
 
 #include "../gl/log.h"
 #include <GL/gl.h>
@@ -39,7 +39,6 @@ extern "C"
     { GLES.name = (name##_PTR)proc_address(gles, #name); }
 #endif
 
-    void* open_lib(const char** names, const char* override);
 
 #define LOAD_EGL(name)                                                                                                 \
     static name##_PTR egl_##name = NULL;                                                                               \
@@ -91,13 +90,9 @@ extern "C"
 
 #define INIT_CHECK_GL_ERROR_FORCE GLenum ERR = GL_NO_ERROR;
 
-#ifndef __APPLE__
-#define NATIVE_FUNCTION_HEAD(type, name, ...)                                                                          \
-    extern "C" GLAPI GLAPIENTRY type name##ARB(__VA_ARGS__) __attribute__((alias(#name)));                             \
-    extern "C" GLAPI GLAPIENTRY type name(__VA_ARGS__) {
-#else
+// iOS-only: Apple Mach-O does not support __attribute__((alias(...))) for
+// ARB-suffixed GL symbols (ELF-only feature).
 #define NATIVE_FUNCTION_HEAD(type, name, ...) extern "C" GLAPI GLAPIENTRY type name(__VA_ARGS__) {
-#endif
 
 #if GLOBAL_DEBUG
 #define NATIVE_FUNCTION_END(type, name, ...)                                                                           \
@@ -169,4 +164,4 @@ extern "C"
 }
 #endif
 
-#endif // MOBILEGLUES_GLES_LOADER_H_
+#endif // MOBILEGLES_GLES_LOADER_H_

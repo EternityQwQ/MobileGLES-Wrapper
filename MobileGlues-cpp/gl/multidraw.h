@@ -1,12 +1,12 @@
-// MobileGlues - gl/multidraw.h
+// MobileGLES - gl/multidraw.h
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
 
-#ifndef MOBILEGLUES_MULTIDRAW_H
-#define MOBILEGLUES_MULTIDRAW_H
+#ifndef MOBILEGLES_MULTIDRAW_H
+#define MOBILEGLES_MULTIDRAW_H
 
 #include <cstdio>
 #include <cstdlib>
@@ -73,4 +73,4 @@ extern "C"
 }
 #endif
 
-#endif // MOBILEGLUES_MULTIDRAW_H
+#endif // MOBILEGLES_MULTIDRAW_H

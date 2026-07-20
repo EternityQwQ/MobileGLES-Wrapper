@@ -1,4 +1,4 @@
-// MobileGlues - gles/gles.h
+// MobileGLES - gles/gles.h
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -7,8 +7,8 @@
 
 #include <GL/gl.h>
 
-#ifndef MOBILEGLUES_GLES_H
-#define MOBILEGLUES_GLES_H
+#ifndef MOBILEGLES_GLES_H
+#define MOBILEGLES_GLES_H
 
 #define GL_TEXTURE_LOD_BIAS_QCOM 0x8C96
 
@@ -864,4 +864,4 @@ extern "C"
 }
 #endif
 
-#endif // MOBILEGLUES_GLES_H
+#endif // MOBILEGLES_GLES_H

@@ -1,4 +1,4 @@
-// MobileGlues - gl/texture.cpp
+// MobileGLES - gl/texture.cpp
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -12,12 +12,6 @@
 #include <cstring>
 #include <vector>
 
-#ifdef __ANDROID__
-#include <android/log.h>
-#endif
-#ifndef __APPLE__
-#include <malloc.h>
-#endif
 
 #include "../gles/gles.h"
 #include "../gles/loader.h"

@@ -1,4 +1,4 @@
-// MobileGlues - gl/log.cpp
+// MobileGLES - gl/log.cpp
 // Copyright (c) 2025-2026 MobileGL-Dev
 // Licensed under the GNU Lesser General Public License v2.1:
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
@@ -11,12 +11,10 @@
 
 #include <GL/gl.h>
 
-#ifndef __ANDROID__
-// Define a stub for __android_log_print if not on Android
+// iOS doesn't have <android/log.h>; provide a no-op stub.
 int __android_log_print(int prio, const char* tag, const char* fmt, ...) {
     return 0; // Do nothing
 }
-#endif
 
 #define CASE(e)                                                                                                        \
     case e:                                                                                                            \
