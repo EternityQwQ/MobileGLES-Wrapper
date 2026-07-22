@@ -47,10 +47,9 @@ void* proc_address(void* lib, const char* name) {
 void set_hardware() {
     hardware = new hardware_s;
     set_es_version();
-    if (hardware->es_version <= 310)
-        hardware->emulate_texture_buffer = true;
-    else
-        hardware->emulate_texture_buffer = false;
+    // GLES 3.0 only: texture buffers are not part of core ES 3.0, so they
+    // must always be emulated (previously gated on es_version <= 310).
+    hardware->emulate_texture_buffer = true;
 }
 
 void init_gl_state() {

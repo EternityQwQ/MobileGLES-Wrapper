@@ -35,6 +35,8 @@ void init_target_egl() {
     LOAD_EGL(eglTerminate);
     LOAD_EGL(eglGetError);
 
+    // Request an OpenGL ES 3.0 context. MobileGLES targets GLES 3.0
+    // exclusively; on iOS this is backed by the ANGLE Metal framework.
     EGLint configAttribs[] = {EGL_RED_SIZE,
                               8,
                               EGL_GREEN_SIZE,
@@ -46,10 +48,10 @@ void init_target_egl() {
                               EGL_SURFACE_TYPE,
                               EGL_PBUFFER_BIT,
                               EGL_RENDERABLE_TYPE,
-                              EGL_OPENGL_ES2_BIT,
+                              EGL_OPENGL_ES3_BIT,
                               EGL_NONE};
 
-    EGLint ctxAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+    EGLint ctxAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
 
     EGLint pbAttribs[] = {EGL_WIDTH, 32, EGL_HEIGHT, 32, EGL_NONE};
 

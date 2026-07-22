@@ -34,9 +34,17 @@ if(NOT APPLE)
     message(FATAL_ERROR "MobileGLES is iOS-only and refuses to build for non-Apple platforms.")
 endif()
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -fvisibility=default -funwind-tables -g -D_THREAD_SAFE -fPIC -stdlib=libc++")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -fvisibility=default -fvisibility-inlines-hidden -funwind-tables -g -D_THREAD_SAFE -fPIC -stdlib=libc++")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -w -g -std=gnu99 -funwind-tables -fvisibility=hidden")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libstdc++")
+
+# iOS-specific optimizations.
+# -ffunction-sections / -fdata-sections emit one section per symbol so the
+#   linker can strip unreachable code/data, shrinking the dylib embedded in
+#   the iOS app bundle. -dead_strip performs that elimination at link time.
+# -fomit-frame-pointer frees up an extra register on arm64 (speed).
+add_compile_options(-ffunction-sections -fdata-sections -fomit-frame-pointer)
+add_link_options(-Wl,-dead_strip)
 
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     # Check if ThinLTO or LTO is supported

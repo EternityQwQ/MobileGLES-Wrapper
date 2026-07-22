@@ -164,7 +164,7 @@ void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const voi
     prepareForDraw();
     if (hardware->es_version < 320 && !g_gles_caps.GL_EXT_draw_elements_base_vertex &&
         !g_gles_caps.GL_OES_draw_elements_base_vertex) {
-        // TODO: use indirect drawing for GLES 3.1
+        // GLES 3.0 baseline: no core base-vertex draw, emulate on the CPU.
         LOG_D("Emulating glDrawElementsBaseVertex")
         GLint prevElementBuffer;
         GLES.glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &prevElementBuffer);

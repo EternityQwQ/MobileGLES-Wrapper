@@ -225,9 +225,17 @@ void set_es_version() {
     } else {
         hardware->es_version = 300;
     }
+    // MobileGLES targets OpenGL ES 3.0 exclusively. GLES 3.1 and 3.2 are no
+    // longer supported: clamp the reported version down to 3.0 so that every
+    // version-branching code path takes the GLES 3.0 route (emulation /
+    // extension based) regardless of what the host driver advertises.
+    if (hardware->es_version > 300) {
+        LOG_I("OpenGL ES %d.%d detected; clamping to 3.0 (GLES 3.1/3.2 support removed).", major, minor)
+        hardware->es_version = 300;
+    }
     LOG_I("OpenGL ES Version: %s (%d)", ESVersionStr.c_str(), hardware->es_version)
     if (hardware->es_version < 300) {
-        LOG_I("OpenGL ES version is lower than 3.0! This version is not supported!")
+        LOG_I("OpenGL ES version is lower than 3.0! GLES 3.0 is the only supported version.")
     }
 }
 
@@ -245,7 +253,7 @@ const GLubyte* glGetString(GLenum name) {
     case GL_VENDOR: {
         if (vendorString.empty()) {
             if (global_settings.hide_mg_env_level == HideMGEnvLevel::Disabled) {
-                std::string vendor = "Swung0x48, BZLZHH, Tungsten";
+                std::string vendor = "Swung0x48, BZLZHH, Tungsten, EternityQwQ";
                 vendorString = vendor;
             } else {
                 const char choices[] = "AINM";
@@ -352,12 +360,9 @@ const GLubyte* glGetString(GLenum name) {
         static std::string shadingLangString;
 
         if (shadingLangString.empty()) {
-            std::string baseVer;
-            if (hardware->es_version < 310) {
-                baseVer = "4.00";
-            } else {
-                baseVer = "4.60";
-            }
+            // GLES 3.0 is the only supported backend; always report the
+            // GLSL ES 3.00 / desktop GL 4.00 shading language string.
+            std::string baseVer = "4.00";
 
             if (global_settings.hide_mg_env_level >= HideMGEnvLevel::Level1) {
                 shadingLangString = baseVer;

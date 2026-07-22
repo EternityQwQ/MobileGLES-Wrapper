@@ -8,6 +8,15 @@
 #ifndef MOBILEGLES_INCLUDES_H
 #define MOBILEGLES_INCLUDES_H
 
+// Compile-time enforcement of the iOS-only target. MobileGLES refuses to
+// build for any non-iOS Apple platform (macOS desktop, tvOS, watchOS, ...) in
+// addition to the CMake-level platform check. This keeps the iOS-specific
+// ANGLE/Metal assumptions valid everywhere in the codebase.
+#include <TargetConditionals.h>
+#if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE
+#error "MobileGLES is iOS-only; this build targets a non-iOS platform."
+#endif
+
 #define RENDERERNAME "MobileGLES"
 
 #include <EGL/egl.h>
