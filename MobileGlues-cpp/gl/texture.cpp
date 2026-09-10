@@ -1470,8 +1470,16 @@ void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat, GLsize
     tex->swizzle_param[2] = GL_BLUE;
     tex->swizzle_param[3] = GL_ALPHA;
 
+    // glGetError is an implicit glFinish on most drivers: it makes the CPU wait
+    // for the whole GPU pipeline to drain, and the exported glGetError never
+    // queries it in release builds (see getter.cpp). Asking the driver for the
+    // error has nothing but diagnostics for it here — this layer returns
+    // GL_NO_ERROR to the application regardless — so keep it out of release
+    // builds instead of flushing the pipeline on every texture allocation.
+#if GLOBAL_DEBUG
     GLenum ERR = GLES.glGetError();
     if (ERR != GL_NO_ERROR) LOG_E("glTexStorage2D ERROR: %d", ERR)
+#endif
 }
 
 // --- glTexStorage3D (native) ---
