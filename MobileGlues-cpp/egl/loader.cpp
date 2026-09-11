@@ -443,8 +443,29 @@ bool BindFallbackEGLContextIfNeeded() {
             const EGLContext old = t_fb.ctx;
             const EGLSurface old_surf = t_fb.bound_surface;
             t_fb.ctx = EGL_NO_CONTEXT;
-            if (CreateThreadContext(t.display, t.context, old_surf)) {
-                if (egl_eglDestroyContext) egl_eglDestroyContext(eglDisplay, old);
+
+            // Hand this thread back to the application's own context instead of
+            // building one that merely shares with it.
+            //
+            // A shared context sees the same buffers, textures and programs, but
+            // it carries its own GL state and the driver has to keep the two in
+            // step. This thread has a context of its own only because
+            // activateOnCreate binds early — so that a reused window is never
+            // left undrawable — and once the application binds its own, the
+            // stand-in has done its job and should be dropped.
+            //
+            // The reference implementation does not have a fallback context at
+            // all: a render thread there always draws on the application's
+            // context. That is the behaviour worth matching, and the gap in
+            // frame rate against it is the reason.
+            if (TryBind(t.display, t.context, old_surf, "hand the thread back to the application's own context")) {
+                t_fb.ctx = t.context;
+                t_fb.share_with = t.context;
+                t_fb.using_app_context = true;
+                t_fb.bound_surface = old_surf;
+                if (egl_eglDestroyContext && old != eglContext) egl_eglDestroyContext(t.display, old);
+            } else if (CreateThreadContext(t.display, t.context, old_surf)) {
+                if (egl_eglDestroyContext) egl_eglDestroyContext(t.display, old);
             } else {
                 t_fb.ctx = old;  // keep what we have rather than lose the context
             }
