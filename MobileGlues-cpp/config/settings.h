@@ -192,6 +192,8 @@ struct global_settings_t {
     // single change in behaviour can be attributed to one of them instead of to
     // the pile. See the notes at each use site for what breaks when it is off.
     bool self_promotion;      // dlopen(self, RTLD_NOLOAD|RTLD_GLOBAL)
+    bool activate_on_create;  // bind a context to a window surface at creation
+    bool proc_address_own;    // eglGetProcAddress answers from this library first
     // Whether every guarded host GL call first ensures a context is current.
     //
     // The reference implementation this was ported from has no such guard at all
@@ -200,6 +202,7 @@ struct global_settings_t {
     // never bound, but it puts a call into the driver (eglGetCurrentContext) in
     // front of every one of the ~127 wrapped entry points, and that is the one
     // structural difference left between this library and the port source.
+    bool host_context_guard;
     // CPU-side per-pixel BGRA/packed reordering on the texture upload paths.
     //
     // The port source does not do this. Its glTexSubImage2D builds an

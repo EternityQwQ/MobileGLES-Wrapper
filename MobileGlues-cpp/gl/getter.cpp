@@ -165,6 +165,12 @@ bool ReportOnce(GLenum pname) {
     return true;
 }
 
+void ReportContextFix(GLenum pname, long long value) {
+    if (!ReportOnce(pname)) return;
+    LOG_W_FORCE("glGetIntegerv(0x%x) read 0 until MobileGLES bound its fallback EGL context, then returned %lld. "
+                "The calling thread had no current EGL context.",
+                pname, value);
+}
 
 void ReportUntracked(GLenum pname, bool rejected) {
     if (!ReportOnce(pname)) return;
@@ -187,6 +193,19 @@ GLint QueryHostInt(GLenum pname) {
         GLint value = 0;
         GLES.glGetIntegerv(pname, &value);
         if (value > 0) return value;
+    }
+
+    // Maybe the thread simply had no context: re-read with ours bound.
+    {
+        ScopedHostContext scoped;
+        if (scoped.Bound() && GLES.glGetIntegerv) {
+            GLint retry = 0;
+            GLES.glGetIntegerv(pname, &retry);
+            if (retry > 0) {
+                ReportContextFix(pname, retry);
+                return retry;
+            }
+        }
     }
 
     const bool rejected = ConsumeHostErrors();
@@ -250,6 +269,19 @@ void mg_guard_host_limit_f(GLenum pname, GLfloat* params) {
 void mg_guard_host_limit_i64(GLenum pname, GLint64* params) {
     using namespace limitguard;
     if (!params || *params > 0) return;
+
+    {
+        ScopedHostContext scoped;
+        if (scoped.Bound() && GLES.glGetInteger64v) {
+            GLint64 retry = 0;
+            GLES.glGetInteger64v(pname, &retry);
+            if (retry > 0) {
+                *params = retry;
+                ReportContextFix(pname, (long long)retry);
+                return;
+            }
+        }
+    }
 
     const bool rejected = ConsumeHostErrors();
     const LimitFallback* entry = FindLimitFallback(pname);
@@ -524,7 +556,18 @@ const GLubyte* QueryHostString(GLenum name) {
     const GLubyte* str = GLES.glGetString(name);
     if (str && *str) return str;
 
-    return nullptr;
+    ScopedHostContext scoped;
+    if (scoped.Bound()) {
+        const GLubyte* retry = GLES.glGetString(name);
+        if (retry && *retry) {
+            LOG_W_FORCE("Host glGetString(0x%x) only answered after binding the fallback context: "
+                        "the calling thread had no current EGL context",
+                        name);
+            return retry;
+        }
+    }
+
+    return (str && *str) ? str : nullptr;
 }
 
 // Queries a host GL string, substituting `fallback` when the driver gives
@@ -830,6 +873,7 @@ const GLubyte* glGetString(GLenum name) {
 // =============================================================================
 
 const GLubyte* glGetStringi(GLenum name, GLuint index) {
+    ScopedHostContext __hostCtx;
     LOG()
 
     if (name == GL_EXTENSIONS + GL_BACKEND_GETTER_MG && global_settings.hide_mg_env_level == HideMGEnvLevel::Disabled) {
@@ -929,6 +973,7 @@ const GLubyte* glGetStringi(GLenum name, GLuint index) {
 // =============================================================================
 
 void glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params) {
+    ScopedHostContext __hostCtx;
     LOG()
     if (GLES.glGetQueryObjectivEXT) {
         GLES.glGetQueryObjectivEXT(id, pname, params);
@@ -937,6 +982,7 @@ void glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params) {
 }
 
 void glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64* params) {
+    ScopedHostContext __hostCtx;
     LOG()
     if (GLES.glGetQueryObjecti64vEXT) {
         GLES.glGetQueryObjecti64vEXT(id, pname, params);
