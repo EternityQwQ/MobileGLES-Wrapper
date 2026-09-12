@@ -216,7 +216,21 @@ void init_settings() {
     // the host supports explicit-flush persistent maps (see the note above).
     global_settings.buffer_coherent_as_flush = (bufferCoherentAsFlushCfg > 0);
     global_settings.self_promotion = (selfPromotionCfg != 0);
-    global_settings.activate_on_create = (activateOnCreateCfg != 0);
+    // Off by default now, matching the port source, which has no such step and
+    // leaves surface activation entirely to the application's eglMakeCurrent.
+    //
+    // This is the one mechanism added here that the port source does not have at
+    // all: it binds a context of this library's own to a newly created window
+    // surface, so that a surface is never left undrawable when SDL reuses its
+    // primary window. Every other difference has been ruled out as the cause of
+    // the frame-rate gap — the per-call wrapper cost measures 0.0008 ms per
+    // frame against an 8.2 ms gap, the context guard is already off by default,
+    // and the upload paths are identical to the port source's — so this is what
+    // remains to be tested.
+    //
+    // Same comparison caveat as hostContextGuard: config_get_int returns -1 for
+    // an absent key, so `!= 0` would read that as on.
+    global_settings.activate_on_create = (activateOnCreateCfg > 0);
     // Off by default, matching the port source, which has no such guard.
     //
     // Note the comparison: config_get_int returns -1 when the key is absent, so
