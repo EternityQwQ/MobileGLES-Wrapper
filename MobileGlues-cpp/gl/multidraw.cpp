@@ -1639,7 +1639,13 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     GLint64 prev_ssbo_size[4] = {};
     for (int i = 0; i < 4; ++i) {
         GLES.glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, i, &prev_ssbo_base[i]);
-        if (GLES.glGetInteger64i_v) {
+        // start/size are only needed to reproduce a sub-range (glBindBufferRange)
+        // binding; an unbound slot (base 0) is restored as glBindBufferBase
+        // regardless. Skipping the two 64-bit queries there removes up to eight
+        // driver round-trips per compute draw on apps that never use these
+        // indexed bindings. When base is non-zero behaviour is identical to the
+        // old unconditional query (start/size are still read).
+        if (prev_ssbo_base[i] != 0 && GLES.glGetInteger64i_v) {
             GLES.glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, i, &prev_ssbo_start[i]);
             GLES.glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, i, &prev_ssbo_size[i]);
         }
