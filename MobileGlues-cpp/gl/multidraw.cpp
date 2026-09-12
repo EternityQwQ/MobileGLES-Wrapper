@@ -303,6 +303,16 @@ static GLuint g_outputibo = 0;
 static GLuint g_compute_program = 0;
 static GLint g_element_size_loc = -1;
 static GLint g_max_compute_groups_x = 0;
+// Largest size this context has successfully *verified* for each grow-only
+// scratch SSBO. The compute path re-specifies these buffers every draw for the
+// WAW race protection, but on a steady-state call the requested size is at most
+// an already-proven allocation, so the per-draw allocation-verification query
+// (a driver round-trip) can be skipped. A capacity in here is only ever
+// advanced after a successful query-based verify, so it can never mask an
+// allocation that failed; reset together with the objects they describe.
+static size_t g_drawcmd_ssbo_cap = 0;
+static size_t g_prefixsumbuffer_cap = 0;
+static size_t g_outputibo_cap = 0;
 
 // glMultiDraw*IndirectCount compaction
 static GLuint g_count_program = 0;
@@ -371,6 +381,9 @@ static void multidraw_check_context() {
     g_compute_program = 0;
     g_element_size_loc = -1;
     g_max_compute_groups_x = 0;
+    g_drawcmd_ssbo_cap = 0;
+    g_prefixsumbuffer_cap = 0;
+    g_outputibo_cap = 0;
 
     g_owner_ctx_id = cur;
     LOG_D("multidraw: context changed, scratch objects invalidated")
@@ -1590,22 +1603,29 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     // coarse level-1 table from Prefix[drawCount ..], so a short allocation would
     // make invocations read out of bounds, and the draw below would consume an
     // uninitialised index buffer.
-    auto upload_ssbo = [](GLuint buf, size_t bytes, const void* data, const char* what) -> bool {
+    auto upload_ssbo = [](GLuint buf, size_t bytes, const void* data, const char* what, size_t* cap) -> bool {
         GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
         GLES.glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(bytes), data, GL_DYNAMIC_DRAW);
-        GLint got = 0;
-        GLES.glGetBufferParameteriv(GL_SHADER_STORAGE_BUFFER, GL_BUFFER_SIZE, &got);
-        if (got < 0 || static_cast<size_t>(got) < bytes) {
-            LOG_W_FORCE("multidraw compute: %s allocation failed (wanted %zu bytes, got %d)", what, bytes, got)
-            return false;
+        // Fast path: this grow-only buffer already proved it can hold `bytes` in
+        // a previous query-verified allocation, so re-specifying to a no-larger
+        // size cannot need re-verifying. Only on actual growth do we pay the
+        // driver round-trip, and <got> is only recorded after it succeeds.
+        if (bytes > *cap) {
+            GLint got = 0;
+            GLES.glGetBufferParameteriv(GL_SHADER_STORAGE_BUFFER, GL_BUFFER_SIZE, &got);
+            if (got < 0 || static_cast<size_t>(got) < bytes) {
+                LOG_W_FORCE("multidraw compute: %s allocation failed (wanted %zu bytes, got %d)", what, bytes, got)
+                return false;
+            }
+            *cap = static_cast<size_t>(got);
         }
         return true;
     };
 
     if (!upload_ssbo(g_drawcmd_ssbo, sizeof(drawcmd_compute_t) * static_cast<size_t>(primcount), drawcmds.data(),
-                     "draw command buffer") ||
+                     "draw command buffer", &g_drawcmd_ssbo_cap) ||
         !upload_ssbo(g_prefixsumbuffer, sizeof(GLuint) * prefix_data.size(), prefix_data.data(),
-                     "prefix sum buffer")) {
+                     "prefix sum buffer", &g_prefixsumbuffer_cap)) {
         GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, prev_ssbo_binding);
         md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
         return;
@@ -1620,17 +1640,24 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
 
     // Verify by query rather than by glGetError: the output buffer is about to be
     // both the compute target and the index source, so drawing from a store that
-    // was never allocated would render garbage.
+    // was never allocated would render garbage. Like the other two scratch
+    // stores, the grow-only output buffer is only re-checked when it has to grow;
+    // a steady-state re-spec to an already-proven size skips the round-trip.
     GLint output_size = 0;
-    GLES.glGetBufferParameteriv(GL_SHADER_STORAGE_BUFFER, GL_BUFFER_SIZE, &output_size);
+    if (output_bytes > g_outputibo_cap) {
+        GLES.glGetBufferParameteriv(GL_SHADER_STORAGE_BUFFER, GL_BUFFER_SIZE, &output_size);
+    }
     GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-    if (output_size < 0 || static_cast<size_t>(output_size) < output_bytes) {
-        MD_WARN_ONCE("multidraw compute: output buffer allocation failed (wanted %zu bytes, got %d), falling back",
-                     output_bytes, output_size);
-        GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, prev_ssbo_binding);
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
-        return;
+    if (output_bytes > g_outputibo_cap) {
+        if (output_size < 0 || static_cast<size_t>(output_size) < output_bytes) {
+            MD_WARN_ONCE("multidraw compute: output buffer allocation failed (wanted %zu bytes, got %d), falling back",
+                         output_bytes, output_size);
+            GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, prev_ssbo_binding);
+            md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+            return;
+        }
+        g_outputibo_cap = static_cast<size_t>(output_size);
     }
 
     // Indexed shader storage bindings are context state, not program state.
