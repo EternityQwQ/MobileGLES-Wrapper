@@ -72,6 +72,9 @@ void init_settings() {
     //
     // Default 0: honour the application's flush. config_get_int() returns -1
     // for an absent key, which is not > 0, so an absent key keeps the default.
+    // Kept only as an override so the coherent and explicit-flush models can be
+    // A/B'd without a rebuild. It no longer decides the default: that is the
+    // ANGLE rule below, matching the port source.
     int bufferCoherentAsFlushCfg = success ? config_get_int("bufferCoherentAsFlush") : -1;
 
 
@@ -211,10 +214,23 @@ void init_settings() {
 
     global_settings.angle = finalAngleMode;
     LOG_D("Final ANGLE setting: %d", static_cast<int>(global_settings.angle))
-    // Was unconditionally true (angle is always Disabled here). Now defaults to
-    // false and is only enabled when explicitly requested in config.json, since
-    // the host supports explicit-flush persistent maps (see the note above).
-    global_settings.buffer_coherent_as_flush = (bufferCoherentAsFlushCfg > 0);
+    // Restored to the port source's rule: tied to ANGLE, not to a config key.
+    //
+    // The port source (snapshot e18513c, measured at 80fps on this device) has
+    // exactly this line and no config override for it, and angle is always
+    // Disabled here, so the value is 1. Making it configurable and defaulting
+    // to 0 was part of the "frame rolls back" fix: that fix stopped discarding
+    // glFlushMappedBufferRange and stopped OR-ing COHERENT into the storage
+    // flags, which moved persistent maps from the coherent model to the
+    // explicit-flush model.
+    //
+    // That model costs a real driver call with cache maintenance per flush, and
+    // Sodium binds buffer ranges ~545 times a second, each followed by one. It
+    // is the one difference that lands on every frame regardless of how much
+    // geometry is on screen, which is what the 20ms floor at 50fps-when-looking-
+    // at-the-sky points at.
+    global_settings.buffer_coherent_as_flush = (global_settings.angle == AngleMode::Disabled);
+    if (bufferCoherentAsFlushCfg >= 0) global_settings.buffer_coherent_as_flush = (bufferCoherentAsFlushCfg > 0);
     global_settings.self_promotion = (selfPromotionCfg != 0);
     // Off by default now, matching the port source, which has no such step and
     // leaves surface activation entirely to the application's eglMakeCurrent.
