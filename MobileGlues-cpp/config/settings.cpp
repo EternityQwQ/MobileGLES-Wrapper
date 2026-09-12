@@ -247,12 +247,28 @@ void init_settings() {
     // Same comparison caveat as hostContextGuard: config_get_int returns -1 for
     // an absent key, so `!= 0` would read that as on.
     global_settings.activate_on_create = (activateOnCreateCfg > 0);
-    // Off by default, matching the port source, which has no such guard.
+    // On by default again.
     //
-    // Note the comparison: config_get_int returns -1 when the key is absent, so
-    // `!= 0` would read that as "on" and silently keep the behaviour under test.
-    // Only an explicit positive value enables it.
-    global_settings.host_context_guard = (hostContextGuardCfg > 0);
+    // Turning it off was an A/B experiment against the frame-rate gap, and it
+    // did not move the frame rate — the gap turned out to be
+    // buffer_coherent_as_flush (see above). Keeping it off costs correctness
+    // instead: with the guard off, a GL call from a thread that has no current
+    // EGL context goes straight to the host and is silently discarded.
+    //
+    // That is what 26.3-pre-3 hit. Its startup queries the device before the
+    // application has bound a context, and every answer came back empty:
+    //   glGetString(GL_RENDERER) -> NULL
+    //   glGetIntegerv(GL_MAX_TEXTURE_SIZE / GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT /
+    //                 GL_MAX_TEXTURE_MAX_ANISOTROPY) -> 0
+    //   glMapBufferRange(UNIFORM_BUFFER, 512) -> NULL, glError 0
+    // and then glCreateShader returned 0, which is what actually crashed it —
+    // the pipeline compiled "shader 0", got no info log, and Minecraft threw
+    // "Failed to find or load pipeline minecraft:pipeline/gui".
+    //
+    // The guard's fast path is one atomic load plus one eglGetCurrentContext()
+    // per GL call, so a thread that already has a context pays almost nothing.
+    // Set "hostContextGuard": 0 in MG/settings.json to disable it.
+    global_settings.host_context_guard = (hostContextGuardCfg != 0);
     global_settings.cpu_swizzle = (cpuSwizzleCfg != 0);
     global_settings.proc_address_own = (procAddressOwnCfg != 0);
 
