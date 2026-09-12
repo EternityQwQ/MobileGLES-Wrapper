@@ -258,12 +258,13 @@ void* glMapNamedBuffer(GLuint buffer, GLenum access) {
     // glMapBufferRange shadow path only triggers for GL_PIXEL_UNPACK_BUFFER),
     // leaving the shadow stale and causing edge color blocks when Xaero
     // updates individual tiles via DSA.
-    if (pbo_shadow_get(buffer) && (access == GL_WRITE_ONLY || access == GL_READ_WRITE)) {
-        GLsizeiptr sz = pbo_shadow_size(buffer);
-        if (sz > 0) {
-            void* shadowPtr = pbo_shadow_map_write(buffer, 0, sz);
-            if (shadowPtr) return shadowPtr;
-        }
+    // Existence and size read in one locked lookup (pbo_shadow_get_ptr_size)
+    // instead of two (pbo_shadow_get + pbo_shadow_size).
+    GLsizeiptr sz = 0;
+    const unsigned char* shadowP = pbo_shadow_get_ptr_size(buffer, &sz);
+    if (shadowP && (access == GL_WRITE_ONLY || access == GL_READ_WRITE) && sz > 0) {
+        void* shadowPtr = pbo_shadow_map_write(buffer, 0, sz);
+        if (shadowPtr) return shadowPtr;
     }
     temporarilyBindBuffer(buffer);
     void* mappedData = glMapBuffer(GL_ARRAY_BUFFER, access);
@@ -315,20 +316,33 @@ GLboolean glUnmapNamedBuffer(GLuint buffer) {
         LOG_W("[DSA] Invalid buffer ID for glUnmapNamedBuffer");
         return GL_FALSE;
     }
-    // PBO shadow path: if this buffer has a shadow, sync the shadow data
-    // to the GLES buffer via glBufferSubData (the GLES buffer was never
-    // mapped when we returned a shadow pointer from glMapNamedBufferRange).
-    if (pbo_shadow_get(buffer)) {
-        GLsizeiptr sz = pbo_shadow_size(buffer);
-        if (sz > 0) {
+    // PBO shadow path: when a DSA map returned a CPU shadow pointer, the GLES
+    // buffer was never actually mapped, so the real unmap must not be called and
+    // the dirty region has to be pushed back via glBufferSubData. Mirror the
+    // non-DSA glUnmapBuffer hot path: capture the mapped [offset, length) and
+    // clear the mapped flag in a single locked lookup (pbo_shadow_unmap_and_get_range)
+    // instead of two (pbo_shadow_get + pbo_shadow_unmap), and upload only the
+    // mapped range rather than the whole shadow. A later glTexSubImage2D reads
+    // the CPU shadow directly, so narrowing the upload costs nothing for the
+    // swizzle path and skips pushing untouched bytes for a small mapped slice
+    // of a large PBO (the minimap-tile-update case).
+    const unsigned char* shadowBase = nullptr;
+    GLintptr mapOffset = 0;
+    GLsizeiptr mapLength = 0;
+    if (pbo_shadow_unmap_and_get_range(buffer, &shadowBase, &mapOffset, &mapLength)) {
+        if (shadowBase && mapLength > 0) {
             temporarilyBindBuffer(buffer);
-            GLES.glBufferSubData(GL_ARRAY_BUFFER, 0, sz, pbo_shadow_get(buffer));
+            GLES.glBufferSubData(GL_ARRAY_BUFFER, mapOffset, mapLength, shadowBase + mapOffset);
             CHECK_GL_ERROR;
             restoreTemporaryBufferBinding();
         }
-        pbo_shadow_unmap(buffer);
         return GL_TRUE;
     }
+    // A shadow exists (created by a DSA alloc/glMapNamedBuffer* on this buffer)
+    // but is not currently write-mapped. Ownership of the mapping lifecycle
+    // still belongs to the shadow, so the real unmap must be skipped; there is
+    // nothing dirty to sync.
+    if (pbo_shadow_get(buffer)) return GL_TRUE;
     temporarilyBindBuffer(buffer);
     GLboolean result = glUnmapBuffer(GL_ARRAY_BUFFER);
     CHECK_GL_ERROR;
@@ -351,10 +365,14 @@ void glFlushMappedNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr le
         // return;
     }
     // PBO shadow path: flush the mapped region from shadow to GLES so
-    // glTexSubImage2D can read the updated data even before unmap.
-    if (pbo_shadow_get(buffer)) {
+    // glTexSubImage2D can read the updated data even before unmap. The shadow
+    // pointer is read once (pbo_shadow_get_ptr_size) instead of calling
+    // pbo_shadow_get twice, halving lock acquisitions on the hot upload path.
+    GLsizeiptr shadowSz = 0;
+    const unsigned char* shadowPtr = pbo_shadow_get_ptr_size(buffer, &shadowSz);
+    if (shadowPtr) {
         temporarilyBindBuffer(buffer);
-        GLES.glBufferSubData(GL_ARRAY_BUFFER, offset, length, pbo_shadow_get(buffer) + offset);
+        GLES.glBufferSubData(GL_ARRAY_BUFFER, offset, length, shadowPtr + offset);
         CHECK_GL_ERROR;
         restoreTemporaryBufferBinding();
         return;
