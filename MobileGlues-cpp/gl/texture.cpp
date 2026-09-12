@@ -1141,7 +1141,6 @@ static inline GLuint* get_tracked_binding(GLenum target, int unit) {
 }
 
 void glBindTexture(GLenum target, GLuint texture) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glBindTexture(%s, %d)", glEnumToString(target), texture)
     INIT_CHECK_GL_ERROR
@@ -1205,7 +1204,6 @@ void glBindTexture(GLenum target, GLuint texture) {
 }
 
 void glDeleteTextures(GLsizei n, const GLuint* textures) {
-    ScopedHostContext __hostCtx;
     LOG()
     INIT_CHECK_GL_ERROR
     GLES.glDeleteTextures(n, textures);
@@ -1228,7 +1226,6 @@ void glDeleteTextures(GLsizei n, const GLuint* textures) {
 }
 
 void glActiveTexture(GLenum texture) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glActiveTexture, texture = %s", glEnumToString(texture))
     if (texture < GL_TEXTURE0 || texture >= GL_TEXTURE0 + MAX_TEXTURE_IMAGE_UNITS) {
@@ -1255,7 +1252,6 @@ void glActiveTexture(GLenum texture) {
 // --- glTexImage2D (native, with format conversion) ---
 void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const GLvoid* pixels) {
-    ScopedHostContext __hostCtx;
     LOG()
 
     LOG_D("mg_glTexImage2D,target: %s,level: %d,internalFormat: %s->%s,width: "
@@ -1336,7 +1332,6 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
 // --- glTexImage3D (native, ES 3.2 supports it) ---
 void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLsizei depth,
                   GLint border, GLenum format, GLenum type, const GLvoid* pixels) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glTexImage3D, target: 0x%x, level: %d, internalFormat: 0x%x, width: "
           "0x%x, height: %d, depth: %d, border: %d, format: 0x%x, type: %d",
@@ -1400,7 +1395,6 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
 // --- glTexSubImage2D (native, with format conversion) ---
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height,
                      GLenum format, GLenum type, const void* pixels) {
-    ScopedHostContext __hostCtx;
     LOG()
 
     LOG_D("glTexSubImage2D, target = %s, level = %d, xoffset = %d, yoffset = %d, "
@@ -1447,7 +1441,6 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
 // --- glTexSubImage3D (native) ---
 void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width,
                      GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glTexSubImage3D, target: %s, level: %d, xoffset: %d, yoffset: %d, zoffset: %d, "
           "width: %d, height: %d, depth: %d, format: %s, type: %s",
@@ -1486,7 +1479,6 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
 
 // --- glTexStorage2D (native) ---
 void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width, GLsizei height) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glTexStorage2D, target: %d, levels: %d, internalFormat: %d, width: "
           "%d, height: %d",
@@ -1513,7 +1505,6 @@ void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat, GLsize
 // --- glTexStorage3D (native) ---
 void glTexStorage3D(GLenum target, GLsizei levels, GLenum internalFormat, GLsizei width, GLsizei height,
                     GLsizei depth) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glTexStorage3D, target: %d, levels: %d, internalFormat: %d, width: "
           "%d, height: %d, depth: %d",
@@ -1544,7 +1535,6 @@ void glTexStorage3D(GLenum target, GLsizei levels, GLenum internalFormat, GLsize
 // --- glCompressedTexImage2D (native) ---
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height,
                             GLint border, GLsizei imageSize, const void* data) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glCompressedTexImage2D, target: %s, level: %d, internalformat: %s, width: %d, height: %d, "
           "border: %d, imageSize: %d",
@@ -1569,7 +1559,6 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
 // --- glCompressedTexImage3D (native) ---
 void glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height,
                             GLsizei depth, GLint border, GLsizei imageSize, const void* data) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glCompressedTexImage3D, target: %s, level: %d, internalformat: %s, width: %d, height: %d, "
           "depth: %d, border: %d, imageSize: %d",
@@ -1594,7 +1583,6 @@ void glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, G
 // --- glCompressedTexSubImage2D (native) ---
 void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
                                GLsizei height, GLenum format, GLsizei imageSize, const void* data) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glCompressedTexSubImage2D, target: %s, level: %d, xoffset: %d, yoffset: %d, "
           "width: %d, height: %d, format: %s, imageSize: %d",
@@ -1608,7 +1596,6 @@ void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint 
 void glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
                                GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize,
                                const void* data) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glCompressedTexSubImage3D, target: %s, level: %d, xoffset: %d, yoffset: %d, zoffset: %d, "
           "width: %d, height: %d, depth: %d, format: %s, imageSize: %d",
@@ -1627,7 +1614,6 @@ void glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint 
 // --- glCopyTexImage2D (native) ---
 void glCopyTexImage2D(GLenum target, GLint level, GLenum internalFormat, GLint x, GLint y, GLsizei width,
                       GLsizei height, GLint border) {
-    ScopedHostContext __hostCtx;
     LOG()
 
     INIT_CHECK_GL_ERROR
@@ -1695,7 +1681,6 @@ void glCopyTexImage2D(GLenum target, GLint level, GLenum internalFormat, GLint x
 // --- glCopyTexSubImage2D (native) ---
 void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width,
                          GLsizei height) {
-    ScopedHostContext __hostCtx;
     LOG()
     GLint internalFormat;
     GLES.glGetTexLevelParameteriv(target, level, GL_TEXTURE_INTERNAL_FORMAT, &internalFormat);
@@ -1744,7 +1729,6 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
 // --- glCopyTexSubImage3D (native) ---
 void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y,
                          GLsizei width, GLsizei height) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glCopyTexSubImage3D, target: %s, level: %d, xoffset: %d, yoffset: %d, zoffset: %d, "
           "x: %d, y: %d, width: %d, height: %d",
@@ -1760,7 +1744,6 @@ void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffse
 
 // --- glGenerateMipmap (native) ---
 void glGenerateMipmap(GLenum target) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glGenerateMipmap, target: %s", glEnumToString(target))
     GLES.glGenerateMipmap(target);
@@ -1780,7 +1763,6 @@ void glGenerateMipmap(GLenum target) {
 
 // --- glTexParameterf (native) ---
 void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
-    ScopedHostContext __hostCtx;
     LOG()
     pname = pname_convert(pname);
     LOG_D("glTexParameterf, target: %d, pname: %d, param: %f", target, pname, param)
@@ -1839,7 +1821,6 @@ void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
 
 // --- glTexParameteri (native) ---
 void glTexParameteri(GLenum target, GLenum pname, GLint param) {
-    ScopedHostContext __hostCtx;
     LOG()
     pname = pname_convert(pname);
     LOG_D("glTexParameteri, pname: 0x%x", pname)
@@ -1912,7 +1893,6 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
 
 // --- glTexParameteriv (native) ---
 void glTexParameteriv(GLenum target, GLenum pname, const GLint* params) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glTexParameteriv, target: %s, pname: %s", glEnumToString(target), glEnumToString(pname))
 
@@ -1990,7 +1970,6 @@ void glTexParameteriv(GLenum target, GLenum pname, const GLint* params) {
 
 // --- glTexParameterfv (native) ---
 void glTexParameterfv(GLenum target, GLenum pname, const GLfloat* params) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glTexParameterfv, target: %s, pname: %s", glEnumToString(target), glEnumToString(pname))
     // GL_TEXTURE_SWIZZLE_*: record AND forward to GLES - see glTexParameteri.
@@ -2039,7 +2018,6 @@ void glTexParameterfv(GLenum target, GLenum pname, const GLfloat* params) {
 
 // --- glGetTexParameteriv (native) ---
 void glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glGetTexParameteriv, target: %s, pname: %s", glEnumToString(target), glEnumToString(pname))
     GLES.glGetTexParameteriv(target, pname, params);
@@ -2048,7 +2026,6 @@ void glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
 
 // --- glGetTexParameterfv (native) ---
 void glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glGetTexParameterfv, target: %s, pname: %s", glEnumToString(target), glEnumToString(pname))
     GLES.glGetTexParameterfv(target, pname, params);
@@ -2057,7 +2034,6 @@ void glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) {
 
 // --- glGetTexLevelParameterfv (native) ---
 void glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat* params) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glGetTexLevelParameterfv,target: %d, level: %d, pname: %d", target, level, pname)
     if (gl_state) {
@@ -2084,7 +2060,6 @@ void glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat*
 
 // --- glGetTexLevelParameteriv (native) ---
 void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint* params) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glGetTexLevelParameteriv,target: %s, level: %d, pname: %s", glEnumToString(target), level,
           glEnumToString(pname))
@@ -2117,7 +2092,6 @@ void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint* p
 // ============================================================================
 
 void glRenderbufferStorage(GLenum target, GLenum internalFormat, GLsizei width, GLsizei height) {
-    ScopedHostContext __hostCtx;
     LOG()
 
     INIT_CHECK_GL_ERROR_FORCE
@@ -2133,7 +2107,6 @@ void glRenderbufferStorage(GLenum target, GLenum internalFormat, GLsizei width, 
 
 void glRenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalFormat, GLsizei width,
                                       GLsizei height) {
-    ScopedHostContext __hostCtx;
     LOG()
 
     INIT_CHECK_GL_ERROR_FORCE
@@ -2233,7 +2206,6 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, void*
 #endif
 
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glReadPixels, x=%d, y=%d, width=%d, height=%d, format=0x%x, "
           "type=0x%x, pixels=0x%x",
@@ -2343,7 +2315,6 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
 }
 
 void glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, const void* data) {
-    ScopedHostContext __hostCtx;
     LOG()
     LOG_D("glClearTexImage, texture: %d, level: %d, format: %d, type: %d", texture, level, format, type)
     INIT_CHECK_GL_ERROR_FORCE
@@ -2411,7 +2382,6 @@ void glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, co
 }
 
 void glPixelStorei(GLenum pname, GLint param) {
-    ScopedHostContext __hostCtx;
     LOG_D("glPixelStorei, pname = %s, param = %d", glEnumToString(pname), param)
     // The six desktop-only pixel-store parameters are answered from the
     // per-context mirror (see gl/pixel.cpp): GLES rejects all six with
