@@ -82,6 +82,7 @@ void init_settings() {
     int selfPromotionCfg = success ? config_get_int("selfPromotion") : -1;
     int activateOnCreateCfg = success ? config_get_int("activateOnCreate") : -1;
     int hostContextGuardCfg = success ? config_get_int("hostContextGuard") : -1;
+    int cpuSwizzleCfg = success ? config_get_int("cpuSwizzle") : -1;
     int procAddressOwnCfg = success ? config_get_int("procAddressOwn") : -1;
 
     if (customGLVersionInt < 0) {
@@ -222,6 +223,7 @@ void init_settings() {
     // `!= 0` would read that as "on" and silently keep the behaviour under test.
     // Only an explicit positive value enables it.
     global_settings.host_context_guard = (hostContextGuardCfg > 0);
+    global_settings.cpu_swizzle = (cpuSwizzleCfg != 0);
     global_settings.proc_address_own = (procAddressOwnCfg != 0);
 
     if (global_settings.angle == AngleMode::Enabled) {
@@ -277,6 +279,8 @@ void init_settings() {
           static_cast<int>(global_settings.activate_on_create))
     LOG_V("[MobileGlues] Setting: hostContextGuard            = %i",
           static_cast<int>(global_settings.host_context_guard))
+    LOG_V("[MobileGlues] Setting: cpuSwizzle                  = %i",
+          static_cast<int>(global_settings.cpu_swizzle))
     LOG_V("[MobileGlues] Setting: procAddressOwn              = %i",
           static_cast<int>(global_settings.proc_address_own))
     if (global_settings.custom_gl_version.isEmpty()) {

@@ -30,7 +30,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "../config/settings.h"
 #include <unordered_map>
+#include <atomic>
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -807,6 +809,40 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
                                               const void* pixels, GLsizei width, GLsizei height, GLsizei depth,
                                               GLuint* outPboToRestore) {
     if (outPboToRestore) *outPboToRestore = 0;
+
+    // Counted once per process, then never again: whether these paths are hit at
+    // all is the question, and a counter answered at the top costs one relaxed
+    // load per call rather than anything per pixel.
+    //
+    // The port source has no such routine — it hands the driver fix.format /
+    // fix.type / fix.pixels and does no per-pixel work — so if this fires during
+    // play it is work the port source simply does not do.
+    {
+        static std::atomic<unsigned long> hits{0};
+        static std::atomic<bool> announced{false};
+        if (pixels != nullptr) {
+            unsigned char probe[4];
+            if (get_rgba8_unpack_swizzle(format, type, probe)) {
+                const unsigned long n = hits.fetch_add(1, std::memory_order_relaxed) + 1;
+                bool expected = false;
+                if (announced.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+                    LOG_W_FORCE("swizzle path HIT (and will keep hitting): format=0x%x type=0x%x %ldx%ldx%ld "
+                                "internalFormat=0x%x — per-pixel CPU reordering on the upload path",
+                                format, type, (long)width, (long)height, (long)depth, internalFormat);
+                }
+                if (n == 10000) {
+                    LOG_W_FORCE("swizzle path has run 10000 times — this is a steady per-frame cost, not startup only");
+                }
+            }
+        }
+    }
+
+    if (!global_settings.cpu_swizzle) {
+        // What the port source does: fix up the enums, leave the bytes alone.
+        if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
+        if (format == GL_BGRA) format = GL_RGBA;
+        return pixels;
+    }
     // PBO-bound path: when a GL_PIXEL_UNPACK_BUFFER is bound, `pixels` is a
     // byte offset into that PBO, NOT a real CPU pointer. To do CPU-side
     // swizzle we first map the PBO for reading, copy+swizzle the relevant
