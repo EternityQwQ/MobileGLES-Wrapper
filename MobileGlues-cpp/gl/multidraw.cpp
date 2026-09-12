@@ -1265,7 +1265,11 @@ uint read_index(uint elementIndex) {
 
 void main() {
     uint outIdx = gl_GlobalInvocationID.x;
-    uint drawCount = uint(prefixSums.length());
+    // drawCmd holds one entry per sub-draw, so its length is the draw count.
+    // The coarse level-1 table is packed into the tail of the Prefix buffer,
+    // right after the `drawCount` fine prefix sums (the host packs it there to
+    // keep the SSBO count at the GLES 3.1 guaranteed minimum of four).
+    uint drawCount = uint(drawCmd.length());
     if (drawCount == 0u) {
         return;
     }
@@ -1274,8 +1278,28 @@ void main() {
         return;
     }
 
-    int low = 0;
-    int high = int(drawCount) - 1;
+    // Level-1 (coarse): one cumulative count per 64-draw bucket, stored at
+    // Prefix[drawCount + b]. Searching this tiny table first costs a handful of
+    // reads off a cache-hot span no matter how many sub-draws there are, leaving
+    // one contiguous 64-entry fine span for the exact draw -- instead of a
+    // full-draw-count binary search with scattered random accesses per output
+    // index (which is what dominates the kernel on scenes with many chunks).
+    uint coarseBase = drawCount;
+    uint level1Count = (drawCount + 63u) / 64u;
+    int blo = 0;
+    int bhi = int(level1Count) - 1;
+    while (blo < bhi) {
+        int bmid = blo + (bhi - blo) / 2;
+        if (prefixSums[coarseBase + uint(bmid)] > outIdx) {
+            bhi = bmid; // next [blo, bmid)
+        } else {
+            blo = bmid + 1; // next [bmid + 1, bhi]
+        }
+    }
+
+    // Fine search restricted to bucket `blo` = draws [blo*64, min((blo+1)*64, drawCount)).
+    int low = blo * 64;
+    int high = int(min(drawCount, uint(blo + 1) * 64u)) - 1;
     while (low < high) {
         int mid = low + (high - low) / 2;
         if (prefixSums[mid] > outIdx) {
@@ -1464,8 +1488,27 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         std::min<uint64_t>(static_cast<uint64_t>(std::numeric_limits<GLint>::max()) / sizeof(GLuint),
                            static_cast<uint64_t>(g_max_compute_groups_x) * 64ull);
 
-    std::vector<GLuint> prefix_sum(static_cast<size_t>(primcount));
+    // Two-level prefix sum for the fused-index kernel's draw lookup.
+    //
+    // The fine level is one entry per sub-draw, as before. The coarse level
+    // stores, per 64-draw bucket, the cumulative index count at the end of that
+    // bucket, packed into the tail of the SAME buffer right after the fine
+    // entries. The kernel first binary-searches the tiny coarse table (a few
+    // cache-hot entries regardless of sub-draw count), then narrows to the
+    // contiguous fine entries of a single bucket — turning most per-output-index
+    // random accesses into reads of a small hot table plus a contiguous 64-entry
+    // span, instead of one search over the whole fine array. Reusing the prefix
+    // buffer keeps the SSBO count at the GLES 3.1 guaranteed minimum of four
+    // compute storage blocks (a fifth block would drop support on minimal
+    // drivers).
+    constexpr GLuint kLevel1Stride = 64u;
+    const GLuint level1_count =
+        static_cast<GLuint>((static_cast<GLuint>(primcount) + kLevel1Stride - 1u) / kLevel1Stride);
+    std::vector<GLuint> prefix_data(static_cast<size_t>(primcount) + level1_count);
     std::vector<drawcmd_compute_t> drawcmds(static_cast<size_t>(primcount));
+
+    GLuint* const prefix_sum = prefix_data.data();                    // [0, primcount)
+    GLuint* const level1 = prefix_data.data() + primcount;            // [primcount, ...)
 
     uint64_t running = 0;
     for (GLsizei i = 0; i < primcount; ++i) {
@@ -1510,7 +1553,17 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         }
     }
 
-    const GLuint total_indices = prefix_sum[static_cast<size_t>(primcount) - 1];
+    // Bucket-end cumulative totals. level1[b] == prefix_sum at draw
+    // min((b+1)*64, primcount)-1, i.e. the count of output indices strictly
+    // before the start of bucket b+1. The final entry equals total_indices.
+    for (GLuint b = 0; b < level1_count; ++b) {
+        const GLuint last = std::min((b + 1u) * kLevel1Stride, static_cast<GLuint>(primcount)) - 1u;
+        level1[b] = prefix_sum[last];
+    }
+
+    // The fine entries are prefix_data[0, primcount); the fused total is the
+    // last fine entry (== level1[level1_count-1]).
+    const GLuint total_indices = prefix_data[static_cast<size_t>(primcount) - 1u];
     if (total_indices == 0) return;
 
     prepareForDraw();
@@ -1525,9 +1578,10 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     GLES.glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &prev_ssbo_binding);
 
     // Both stores are verified by query, like the output buffer below. The prefix
-    // store especially: the shader derives drawCount from prefixSums.length(), so
-    // a short allocation makes every invocation return early, nothing is written,
-    // and the draw below would read an uninitialised index buffer.
+    // store especially: the shader reads drawCount from drawCmd.length() and the
+    // coarse level-1 table from Prefix[drawCount ..], so a short allocation would
+    // make invocations read out of bounds, and the draw below would consume an
+    // uninitialised index buffer.
     auto upload_ssbo = [](GLuint buf, size_t bytes, const void* data, const char* what) -> bool {
         GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
         GLES.glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(bytes), data, GL_DYNAMIC_DRAW);
@@ -1542,7 +1596,7 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
 
     if (!upload_ssbo(g_drawcmd_ssbo, sizeof(drawcmd_compute_t) * static_cast<size_t>(primcount), drawcmds.data(),
                      "draw command buffer") ||
-        !upload_ssbo(g_prefixsumbuffer, sizeof(GLuint) * static_cast<size_t>(primcount), prefix_sum.data(),
+        !upload_ssbo(g_prefixsumbuffer, sizeof(GLuint) * prefix_data.size(), prefix_data.data(),
                      "prefix sum buffer")) {
         GLES.glBindBuffer(GL_SHADER_STORAGE_BUFFER, prev_ssbo_binding);
         md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
