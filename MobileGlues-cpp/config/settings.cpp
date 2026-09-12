@@ -216,7 +216,12 @@ void init_settings() {
     global_settings.buffer_coherent_as_flush = (bufferCoherentAsFlushCfg > 0);
     global_settings.self_promotion = (selfPromotionCfg != 0);
     global_settings.activate_on_create = (activateOnCreateCfg != 0);
-    global_settings.host_context_guard = (hostContextGuardCfg != 0);
+    // Off by default, matching the port source, which has no such guard.
+    //
+    // Note the comparison: config_get_int returns -1 when the key is absent, so
+    // `!= 0` would read that as "on" and silently keep the behaviour under test.
+    // Only an explicit positive value enables it.
+    global_settings.host_context_guard = (hostContextGuardCfg > 0);
     global_settings.proc_address_own = (procAddressOwnCfg != 0);
 
     if (global_settings.angle == AngleMode::Enabled) {
