@@ -1179,18 +1179,13 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
         // frame's geometry. The main menu allocates no chunk buffers, which is
         // why it looked fine.
         //
-        // buffer_coherent_as_flush=1 used to paper over this by OR-ing in
-        // WRITE|COHERENT|PERSISTENT. Turning it off exposed the rejection. Add
-        // only a direction bit here: COHERENT is deliberately NOT added, so the
-        // application's own glFlushMappedBufferRange remains the ordering
-        // signal, which is the whole point of that setting being 0.
-        const GLbitfield map_direction = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;
-        const GLbitfield needs_direction =
-            GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT | GL_MAP_FLUSH_EXPLICIT_BIT | GL_DYNAMIC_STORAGE_BIT;
-        if ((flags & needs_direction) != 0 && (flags & map_direction) == 0) {
-            flags |= GL_MAP_WRITE_BIT;
-        }
-
+        // Why this is not a fix for the rejection above any more: with
+        // buffer_coherent_as_flush restored to 1 (see config/settings.cpp) this
+        // branch fires for every persistent/dynamic allocation and OR-s in
+        // WRITE|COHERENT|PERSISTENT, so the direction bits are present and the
+        // host accepts the allocation. The separate "add only a direction bit"
+        // step that used to sit here is gone because it only existed to rescue
+        // the explicit-flush model, which is no longer in use.
         if (global_settings.buffer_coherent_as_flush &&
             ((flags & GL_MAP_PERSISTENT_BIT) != 0 || (flags & GL_DYNAMIC_STORAGE_BIT) != 0))
             flags |= (GL_MAP_WRITE_BIT | GL_MAP_COHERENT_BIT | GL_MAP_PERSISTENT_BIT);

@@ -72,6 +72,9 @@ void init_settings() {
     //
     // Default 0: honour the application's flush. config_get_int() returns -1
     // for an absent key, which is not > 0, so an absent key keeps the default.
+    // Kept only as an override so the coherent and explicit-flush models can be
+    // A/B'd without a rebuild. It no longer decides the default: that is the
+    // ANGLE rule below, matching the port source.
     int bufferCoherentAsFlushCfg = success ? config_get_int("bufferCoherentAsFlush") : -1;
 
 
@@ -81,6 +84,8 @@ void init_settings() {
     // others staying on so the difference can be attributed to that one alone.
     int selfPromotionCfg = success ? config_get_int("selfPromotion") : -1;
     int activateOnCreateCfg = success ? config_get_int("activateOnCreate") : -1;
+    int hostContextGuardCfg = success ? config_get_int("hostContextGuard") : -1;
+    int cpuSwizzleCfg = success ? config_get_int("cpuSwizzle") : -1;
     int procAddressOwnCfg = success ? config_get_int("procAddressOwn") : -1;
 
     if (customGLVersionInt < 0) {
@@ -209,12 +214,62 @@ void init_settings() {
 
     global_settings.angle = finalAngleMode;
     LOG_D("Final ANGLE setting: %d", static_cast<int>(global_settings.angle))
-    // Was unconditionally true (angle is always Disabled here). Now defaults to
-    // false and is only enabled when explicitly requested in config.json, since
-    // the host supports explicit-flush persistent maps (see the note above).
-    global_settings.buffer_coherent_as_flush = (bufferCoherentAsFlushCfg > 0);
+    // Restored to the port source's rule: tied to ANGLE, not to a config key.
+    //
+    // The port source (snapshot e18513c, measured at 80fps on this device) has
+    // exactly this line and no config override for it, and angle is always
+    // Disabled here, so the value is 1. Making it configurable and defaulting
+    // to 0 was part of the "frame rolls back" fix: that fix stopped discarding
+    // glFlushMappedBufferRange and stopped OR-ing COHERENT into the storage
+    // flags, which moved persistent maps from the coherent model to the
+    // explicit-flush model.
+    //
+    // That model costs a real driver call with cache maintenance per flush, and
+    // Sodium binds buffer ranges ~545 times a second, each followed by one. It
+    // is the one difference that lands on every frame regardless of how much
+    // geometry is on screen, which is what the 20ms floor at 50fps-when-looking-
+    // at-the-sky points at.
+    global_settings.buffer_coherent_as_flush = (global_settings.angle == AngleMode::Disabled);
+    if (bufferCoherentAsFlushCfg >= 0) global_settings.buffer_coherent_as_flush = (bufferCoherentAsFlushCfg > 0);
     global_settings.self_promotion = (selfPromotionCfg != 0);
-    global_settings.activate_on_create = (activateOnCreateCfg != 0);
+    // Off by default now, matching the port source, which has no such step and
+    // leaves surface activation entirely to the application's eglMakeCurrent.
+    //
+    // This is the one mechanism added here that the port source does not have at
+    // all: it binds a context of this library's own to a newly created window
+    // surface, so that a surface is never left undrawable when SDL reuses its
+    // primary window. Every other difference has been ruled out as the cause of
+    // the frame-rate gap — the per-call wrapper cost measures 0.0008 ms per
+    // frame against an 8.2 ms gap, the context guard is already off by default,
+    // and the upload paths are identical to the port source's — so this is what
+    // remains to be tested.
+    //
+    // Same comparison caveat as hostContextGuard: config_get_int returns -1 for
+    // an absent key, so `!= 0` would read that as on.
+    global_settings.activate_on_create = (activateOnCreateCfg > 0);
+    // On by default again.
+    //
+    // Turning it off was an A/B experiment against the frame-rate gap, and it
+    // did not move the frame rate — the gap turned out to be
+    // buffer_coherent_as_flush (see above). Keeping it off costs correctness
+    // instead: with the guard off, a GL call from a thread that has no current
+    // EGL context goes straight to the host and is silently discarded.
+    //
+    // That is what 26.3-pre-3 hit. Its startup queries the device before the
+    // application has bound a context, and every answer came back empty:
+    //   glGetString(GL_RENDERER) -> NULL
+    //   glGetIntegerv(GL_MAX_TEXTURE_SIZE / GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT /
+    //                 GL_MAX_TEXTURE_MAX_ANISOTROPY) -> 0
+    //   glMapBufferRange(UNIFORM_BUFFER, 512) -> NULL, glError 0
+    // and then glCreateShader returned 0, which is what actually crashed it —
+    // the pipeline compiled "shader 0", got no info log, and Minecraft threw
+    // "Failed to find or load pipeline minecraft:pipeline/gui".
+    //
+    // The guard's fast path is one atomic load plus one eglGetCurrentContext()
+    // per GL call, so a thread that already has a context pays almost nothing.
+    // Set "hostContextGuard": 0 in MG/settings.json to disable it.
+    global_settings.host_context_guard = (hostContextGuardCfg != 0);
+    global_settings.cpu_swizzle = (cpuSwizzleCfg != 0);
     global_settings.proc_address_own = (procAddressOwnCfg != 0);
 
     if (global_settings.angle == AngleMode::Enabled) {
@@ -268,6 +323,10 @@ void init_settings() {
           static_cast<int>(global_settings.self_promotion))
     LOG_V("[MobileGlues] Setting: activateOnCreate            = %i",
           static_cast<int>(global_settings.activate_on_create))
+    LOG_V("[MobileGlues] Setting: hostContextGuard            = %i",
+          static_cast<int>(global_settings.host_context_guard))
+    LOG_V("[MobileGlues] Setting: cpuSwizzle                  = %i",
+          static_cast<int>(global_settings.cpu_swizzle))
     LOG_V("[MobileGlues] Setting: procAddressOwn              = %i",
           static_cast<int>(global_settings.proc_address_own))
     if (global_settings.custom_gl_version.isEmpty()) {

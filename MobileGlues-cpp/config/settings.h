@@ -194,6 +194,28 @@ struct global_settings_t {
     bool self_promotion;      // dlopen(self, RTLD_NOLOAD|RTLD_GLOBAL)
     bool activate_on_create;  // bind a context to a window surface at creation
     bool proc_address_own;    // eglGetProcAddress answers from this library first
+    // Whether every guarded host GL call first ensures a context is current.
+    //
+    // The reference implementation this was ported from has no such guard at all
+    // — its render thread always runs on the application's own context. Adding
+    // one here was part of making GL calls work from threads the application
+    // never bound, but it puts a call into the driver (eglGetCurrentContext) in
+    // front of every one of the ~127 wrapped entry points, and that is the one
+    // structural difference left between this library and the port source.
+    bool host_context_guard;
+    // CPU-side per-pixel BGRA/packed reordering on the texture upload paths.
+    //
+    // The port source does not do this. Its glTexSubImage2D builds an
+    // mg_upload_fix_t and hands fix.format / fix.type / fix.pixels straight to
+    // the driver, with no per-pixel work at all. This library routes the same
+    // four entry points (TexImage2D/3D, TexSubImage2D/3D) through
+    // swizzle_pixels_for_unpack() instead, which copies and rewrites every
+    // pixel on the CPU, and on top of that issues four glTexParameteri calls to
+    // reset the texture swizzle whenever it fires.
+    //
+    // Off means: normalise the enums (BGRA -> RGBA, packed -> UNSIGNED_BYTE) and
+    // upload as-is, which is what the port source does.
+    bool cpu_swizzle;
     size_t max_glsl_cache_size;
     // Resolved backend per multi-draw entry point. Always a concrete backend
     // after init_settings_post(); never md_backend_t::Auto.
