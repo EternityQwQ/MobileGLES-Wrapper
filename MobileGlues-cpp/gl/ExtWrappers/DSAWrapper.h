@@ -4,6 +4,27 @@
 //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 // SPDX-License-Identifier: LGPL-2.1-only
 // End of Source File Header
+//
+// Direct State Access (GL 4.5 / ARB_direct_state_access) emulated on GLES 3.2.
+//
+// GLES has no DSA entry points at all. Every gl*Named* call here is therefore
+// emulated with a "temporary bind" dance:
+//
+//     1. read the object currently bound to the relevant target (CPU side)
+//     2. bind the object the caller named
+//     3. issue the classic (non-DSA) GLES call
+//     4. bind the previous object back
+//
+// Step 1 and the bookkeeping in step 4 are done purely on the CPU: this layer
+// tracks its own bindings the same way the rest of the gl/ stack does, so the
+// hot path never touches the GPU just to ask "what is currently bound?". Only
+// objects whose binding the gl/ stack does not track (samplers, program
+// pipelines, transform feedback) fall back to a real GL query, and those are
+// cold paths by nature.
+//
+// All temporary bindings go through a single generic stack
+// (dsa::BindingScope<>) keyed by the GL target, which keeps the save/restore
+// logic in one place instead of five near-identical copies.
 #pragma once
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
@@ -166,3 +187,23 @@ extern "C"
     GLAPI void glGetQueryBufferObjecti64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
     GLAPI void glGetQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
 }
+
+// ============================================================================
+// Internal helpers, exposed for the (few) other translation units that need
+// to perform the same temporary-bind dance. Not part of the public GL ABI.
+// ============================================================================
+
+namespace dsa
+{
+    // Maps a GL target to the enum that must be passed to glGetIntegerv() to
+    // read back the binding for that target. Returns 0 when `target` is not a
+    // binding-bearing target. Pass textureBinding=true for GL_TEXTURE_BUFFER
+    // when the texture-side binding (GL_TEXTURE_BINDING_BUFFER) is meant
+    // rather than the buffer-side one (GL_TEXTURE_BUFFER_BINDING).
+    GLenum QueryForTarget(GLenum target, bool textureBinding = false);
+
+    // Returns the object currently bound to `target`, read from the CPU-side
+    // tracking maintained by the gl/ stack. No GL query where the stack tracks
+    // the binding itself.
+    GLuint CurrentBinding(GLenum target);
+} // namespace dsa
