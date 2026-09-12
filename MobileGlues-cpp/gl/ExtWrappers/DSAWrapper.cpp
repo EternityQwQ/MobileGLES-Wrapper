@@ -41,6 +41,27 @@
 // Target → binding query
 // ============================================================================
 
+// Returns true when `target` names a texture target, i.e. one that must be
+// bound with glBindTexture() rather than glBindBuffer().
+static inline bool IsTextureTarget(GLenum target) {
+    switch (target) {
+    case GL_TEXTURE_1D:
+    case GL_TEXTURE_2D:
+    case GL_TEXTURE_3D:
+    case GL_TEXTURE_CUBE_MAP:
+    case GL_TEXTURE_1D_ARRAY:
+    case GL_TEXTURE_2D_ARRAY:
+    case GL_TEXTURE_RECTANGLE:
+    case GL_TEXTURE_CUBE_MAP_ARRAY:
+    case GL_TEXTURE_2D_MULTISAMPLE:
+    case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+    case GL_TEXTURE_BUFFER:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // Maps a GL target to the enum glGetIntegerv() expects for that target's
 // binding, or 0 when the target carries no binding.
 GLenum dsa::QueryForTarget(GLenum target, bool textureBinding) {
@@ -76,33 +97,81 @@ GLenum dsa::QueryForTarget(GLenum target, bool textureBinding) {
     }
 }
 
+// Returns the object currently bound to `target`, read from the CPU-side
+// tracking that the gl/ stack maintains for every binding it forwards to GLES.
+//
+// Answering this from the trackers rather than from glGetIntegerv() is the
+// whole point of the rewrite: the gl/ stack is the single source of truth for
+// these bindings, so a query round-trip (which stalls the pipeline) can only
+// ever agree with it or be stale.
+//
+// The exceptions are the four families whose legacy wrappers hand the bind
+// straight to GLES without recording it -- renderbuffers, samplers, program
+// pipelines and transform feedback. For those there is no tracker to read, so
+// the driver is asked. Those paths are rare (they appear in setup code, not in
+// draw loops), which is why the cost is acceptable there and nowhere else.
+GLuint dsa::CurrentBinding(GLenum target) {
+    switch (target) {
+        // --- framebuffers: tracked, and *not* the same for read and draw ---
+    case GL_FRAMEBUFFER:
+    case GL_DRAW_FRAMEBUFFER:
+        return current_draw_fbo;
+    case GL_READ_FRAMEBUFFER:
+        return current_read_fbo;
+
+        // --- vertex arrays ---
+    case GL_VERTEX_ARRAY:
+        return find_bound_array();
+
+    // --- textures: per-unit, which is what the caller wants ---
+    // Resolved through the tracker so a bind on the *current* unit is what is
+    // reported, matching what BindTargetNow() would displace.
+    case GL_TEXTURE_1D:
+    case GL_TEXTURE_2D:
+    case GL_TEXTURE_3D:
+    case GL_TEXTURE_CUBE_MAP:
+    case GL_TEXTURE_1D_ARRAY:
+    case GL_TEXTURE_2D_ARRAY:
+    case GL_TEXTURE_RECTANGLE:
+    case GL_TEXTURE_CUBE_MAP_ARRAY:
+    case GL_TEXTURE_2D_MULTISAMPLE:
+    case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+    case GL_TEXTURE_BUFFER: {
+        TextureObject* tex = mgGetTexObjectByTarget(target);
+        return tex ? tex->texture : 0;
+    }
+
+        // --- cold paths: no tracker exists for these ---
+    case GL_RENDERBUFFER:
+    case GL_SAMPLER:
+    case GL_PROGRAM_PIPELINE:
+    case GL_TRANSFORM_FEEDBACK: {
+        const GLenum query = QueryForTarget(target);
+        if (query == 0) return 0;
+        GLint bound = 0;
+        glGetIntegerv(query, &bound);
+        return static_cast<GLuint>(bound);
+    }
+
+    default:
+        // Buffers and every other binding-bearing target. The tracker keys off
+        // the *_BINDING enum, which QueryForTarget() produces; when the target
+        // carries no binding at all QueryForTarget() returns 0 and there is
+        // nothing to report.
+        {
+            const GLenum query = QueryForTarget(target, IsTextureTarget(target));
+            if (query == 0) return 0;
+            return find_bound_buffer(query);
+        }
+    }
+}
+
 // ============================================================================
 // One generic temporary-binding stack for every object family
 // ============================================================================
 
 namespace
 {
-    // Returns true when `target` names a texture target, i.e. one that must be
-    // bound with glBindTexture() rather than glBindBuffer().
-    inline bool IsTextureTarget(GLenum target) {
-        switch (target) {
-        case GL_TEXTURE_1D:
-        case GL_TEXTURE_2D:
-        case GL_TEXTURE_3D:
-        case GL_TEXTURE_CUBE_MAP:
-        case GL_TEXTURE_1D_ARRAY:
-        case GL_TEXTURE_2D_ARRAY:
-        case GL_TEXTURE_RECTANGLE:
-        case GL_TEXTURE_CUBE_MAP_ARRAY:
-        case GL_TEXTURE_2D_MULTISAMPLE:
-        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
-        case GL_TEXTURE_BUFFER:
-            return true;
-        default:
-            return false;
-        }
-    }
-
     // Issues the bind for `target`. One switch instead of five, so the
     // save/restore path below is written exactly once.
     void BindTargetNow(GLenum target, GLuint object) {
