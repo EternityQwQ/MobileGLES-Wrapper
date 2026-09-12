@@ -1504,8 +1504,16 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     constexpr GLuint kLevel1Stride = 64u;
     const GLuint level1_count =
         static_cast<GLuint>((static_cast<GLuint>(primcount) + kLevel1Stride - 1u) / kLevel1Stride);
-    std::vector<GLuint> prefix_data(static_cast<size_t>(primcount) + level1_count);
-    std::vector<drawcmd_compute_t> drawcmds(static_cast<size_t>(primcount));
+    // Reused grow-only scratch (never shrunk), the same pattern as the indirect
+    // path's `staged` and the CPU path's `rebased`. The vectors were built fresh
+    // on every call before, paying a malloc/free per multi-draw compute call for
+    // no observable benefit. Every failure-fallback above returns before this
+    // point, so only the first `primcount` fine entries and the level-1 tail are
+    // written; the value left beyond that is stale but never read.
+    static thread_local std::vector<GLuint> prefix_data;
+    static thread_local std::vector<drawcmd_compute_t> drawcmds;
+    prefix_data.resize(static_cast<size_t>(primcount) + level1_count);
+    drawcmds.resize(static_cast<size_t>(primcount));
 
     GLuint* const prefix_sum = prefix_data.data();                    // [0, primcount)
     GLuint* const level1 = prefix_data.data() + primcount;            // [primcount, ...)
