@@ -81,6 +81,7 @@ void init_settings() {
     // others staying on so the difference can be attributed to that one alone.
     int selfPromotionCfg = success ? config_get_int("selfPromotion") : -1;
     int activateOnCreateCfg = success ? config_get_int("activateOnCreate") : -1;
+    int hostContextGuardCfg = success ? config_get_int("hostContextGuard") : -1;
     int procAddressOwnCfg = success ? config_get_int("procAddressOwn") : -1;
 
     if (customGLVersionInt < 0) {
@@ -215,6 +216,7 @@ void init_settings() {
     global_settings.buffer_coherent_as_flush = (bufferCoherentAsFlushCfg > 0);
     global_settings.self_promotion = (selfPromotionCfg != 0);
     global_settings.activate_on_create = (activateOnCreateCfg != 0);
+    global_settings.host_context_guard = (hostContextGuardCfg != 0);
     global_settings.proc_address_own = (procAddressOwnCfg != 0);
 
     if (global_settings.angle == AngleMode::Enabled) {
@@ -268,6 +270,8 @@ void init_settings() {
           static_cast<int>(global_settings.self_promotion))
     LOG_V("[MobileGlues] Setting: activateOnCreate            = %i",
           static_cast<int>(global_settings.activate_on_create))
+    LOG_V("[MobileGlues] Setting: hostContextGuard            = %i",
+          static_cast<int>(global_settings.host_context_guard))
     LOG_V("[MobileGlues] Setting: procAddressOwn              = %i",
           static_cast<int>(global_settings.proc_address_own))
     if (global_settings.custom_gl_version.isEmpty()) {

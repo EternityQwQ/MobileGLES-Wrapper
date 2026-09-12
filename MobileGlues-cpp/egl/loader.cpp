@@ -819,6 +819,8 @@ static void RepairSdlCurrentWindow() {
 // Accumulating per thread and publishing in batches removes the contention
 // without changing what the watchdog reports: it samples every 20 seconds, so a
 // count that lags by at most one batch is indistinguishable from an exact one.
+bool mg_egl_host_context_guard_enabled() { return global_settings.host_context_guard; }
+
 void mg_egl_note_guarded_call() {
     static thread_local unsigned long t_calls = 0;
     ++t_calls;

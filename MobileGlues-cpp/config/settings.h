@@ -194,6 +194,15 @@ struct global_settings_t {
     bool self_promotion;      // dlopen(self, RTLD_NOLOAD|RTLD_GLOBAL)
     bool activate_on_create;  // bind a context to a window surface at creation
     bool proc_address_own;    // eglGetProcAddress answers from this library first
+    // Whether every guarded host GL call first ensures a context is current.
+    //
+    // The reference implementation this was ported from has no such guard at all
+    // — its render thread always runs on the application's own context. Adding
+    // one here was part of making GL calls work from threads the application
+    // never bound, but it puts a call into the driver (eglGetCurrentContext) in
+    // front of every one of the ~127 wrapped entry points, and that is the one
+    // structural difference left between this library and the port source.
+    bool host_context_guard;
     size_t max_glsl_cache_size;
     // Resolved backend per multi-draw entry point. Always a concrete backend
     // after init_settings_post(); never md_backend_t::Auto.

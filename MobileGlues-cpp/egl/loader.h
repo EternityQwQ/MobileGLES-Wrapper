@@ -236,9 +236,30 @@ extern "C"
 // a ranking only needed while diagnosing), and with it the only use of the name.
 void mg_egl_note_guarded_call();
 
+// Whether the guard runs at all.
+//
+// The port source has no guard of this kind anywhere: its render thread is
+// always on the application's own context, so it never needs one installed.
+// This library grew one because GL calls here also arrive from threads the
+// application never bound — shader compilation, chunk building — and a host
+// driver given a call with no current context does nothing and reports no
+// error.
+//
+// The cost is one eglGetCurrentContext() per guarded entry point, and there are
+// about 127 of them. That is assumed to be a thread-local read, but the
+// assumption has never been checked against this driver, and it is the one
+// structural difference left between this library and the port source that runs
+// at the frame rate this one does not.
+//
+// Off means: no context is installed, and a call arriving on a thread without
+// one is passed through exactly as the port source would pass it.
+bool mg_egl_host_context_guard_enabled();
+
 class ScopedHostContext {
 public:
-    ScopedHostContext() : bound_(BindFallbackEGLContextIfNeeded()) { mg_egl_note_guarded_call(); }
+    ScopedHostContext() : bound_(mg_egl_host_context_guard_enabled() ? BindFallbackEGLContextIfNeeded() : false) {
+        mg_egl_note_guarded_call();
+    }
     ~ScopedHostContext() {
         if (bound_) UnbindFallbackEGLContext();
     }
