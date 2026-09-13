@@ -236,6 +236,23 @@ extern "C"
 // a ranking only needed while diagnosing), and with it the only use of the name.
 void mg_egl_note_guarded_call();
 
+// The guard-off counterpart. Runs the SDL swap-gate tick on every call made
+// while the eager guard is disabled — the default.
+//
+// It must exist separately because the SDL repair is not guard work. SDL's TLS
+// record of the current window is lost by the launcher's window-reuse hook no
+// matter which mode is active; when this tick lived only in the guarded path,
+// turning the guard off silenced it, and the result was every frame rendered
+// and none shown — the game runs, audio plays, touch works, eglSwapBuffers is
+// simply never reached because SDL refuses the swap before it happens. That is
+// the real-device regression that produced a black screen with working sound.
+//
+// Steady-state cost with the guard off: one thread-local increment plus one
+// modulo. The expensive body sits behind that gate, behind a per-attempt
+// budget, behind a check that the calling thread is the one holding the
+// application's binding.
+void mg_egl_note_unguarded_call();
+
 // Whether the guard runs at all.
 //
 // The port source has no guard of this kind anywhere: its render thread is
@@ -311,8 +328,17 @@ public:
         // thread is usable.
         bound_ = EnsureHostContextOnce();
 
-        // Only counted when the guard is on: this feeds the watchdog's call
-        // rate, which describes the per-call check that is not running.
+        // The watchdog's call-rate counter is deliberately NOT fed here: it
+        // describes the per-call check this mode does not make, and counting
+        // calls would report a cost the mode does not pay.
+        //
+        // But the SDL swap-gate tick is NOT guard work — see the comment on
+        // mg_egl_note_unguarded_call(). Leaving it inside the guarded branch
+        // only was the placement bug that black-screened the game on a real
+        // device the moment the guard's default became off: rendering kept
+        // running, audio and touch stayed alive, and the swap was refused by
+        // SDL on every frame. It runs on both paths from here on.
+        mg_egl_note_unguarded_call();
     }
     ~ScopedHostContext() {
         if (bound_) UnbindFallbackEGLContext();

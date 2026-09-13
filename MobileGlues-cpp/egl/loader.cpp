@@ -836,18 +836,26 @@ static void RepairSdlCurrentWindow() {
 // count that lags by at most one batch is indistinguishable from an exact one.
 bool mg_egl_host_context_guard_enabled() { return global_settings.host_context_guard; }
 
-void mg_egl_note_guarded_call() {
-    static thread_local unsigned long t_calls = 0;
-    ++t_calls;
-    VerifyContextStillCurrent(t_calls);
-
-    // The repair below is the fix for the black screen, so it has to run — but
-    // it only ever matters a handful of times, and this function is on the path
+// ---------------------------------------------------------------------------
+// The SDL swap-gate tick — the trigger for RepairSdlCurrentWindow().
+//
+// This used to live only inside mg_egl_note_guarded_call(), and that placement
+// was the real-device regression: the guard's default was turned off, the note
+// stopped being called, and the SDL repair died with it. The failure it causes
+// is not a crash and not an error — the game renders every frame, audio plays,
+// touch works — but SDL refuses every swap, so eglSwapBuffers never reaches the
+// driver and nothing ever appears on screen. The reason is placement, not
+// design: whether SDL's TLS bookkeeping was lost has nothing to do with whether
+// the per-call guard runs. The tick therefore belongs on BOTH per-call paths,
+// which is what the split below expresses.
+// ---------------------------------------------------------------------------
+static void SdlSwapGateTick(unsigned long calls_on_this_thread) {
+    // It only ever matters a handful of times, and this function is on the path
     // of every single GL call. Everything expensive is therefore behind the
     // cheapest possible test first: an integer modulo on a thread-local, then
     // a plain non-atomic read. No atomic, no dlopen, no dlsym unless the cheap
     // test has already passed.
-    if ((t_calls % 5000) == 0 && !g_sdl_repair_done) {
+    if ((calls_on_this_thread % 5000) == 0 && !g_sdl_repair_done) {
         const AppRenderTarget& rt = mg_egl_app_target();
         if (rt.have_binding && rt.binding_thread == (unsigned long)pthread_self()) {
             const int n = g_sdl_repair_attempts.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -855,8 +863,26 @@ void mg_egl_note_guarded_call() {
             if (n >= 8) g_sdl_repair_done = true;
         }
     }
+}
 
+void mg_egl_note_guarded_call() {
+    static thread_local unsigned long t_calls = 0;
+    ++t_calls;
+    VerifyContextStillCurrent(t_calls);
+    SdlSwapGateTick(t_calls);
+}
 
+// The guard-off counterpart of mg_egl_note_guarded_call(). Called from
+// ScopedHostContext's guard-off branch, i.e. from every entry point in the
+// default configuration. Steady-state cost: one thread-local increment and one
+// modulo — no EGL call, no lock. RepairHostContextOnce() did not cover this
+// because it only runs after an observed failure, and a refused swap produces
+// no failure this library can see: SDL checks its own TLS and sets its own
+// error before eglSwapBuffers is ever reached.
+void mg_egl_note_unguarded_call() {
+    static thread_local unsigned long t_calls = 0;
+    ++t_calls;
+    SdlSwapGateTick(t_calls);
 }
 
 // Pairs a successful BindFallbackEGLContextIfNeeded().
