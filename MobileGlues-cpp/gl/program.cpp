@@ -28,6 +28,25 @@ GLuint glCreateProgram() {
     ScopedHostContext __hostCtx;
     LOG()
     GLuint program = GLES.glCreateProgram();
+
+    // Same failure and same fix as glCreateShader (see the long comment there):
+    // a thread with no current EGL context gets a silent 0, and this release's
+    // startup calls this before the application has bound a context.
+    //
+    // It matters more here than for shaders, because the tracking below runs
+    // unconditionally — a 0 would be written into programMap/programMapReverse/
+    // programInfo as if it were a real object, leaving the state manager
+    // describing a program that does not exist. Repairing first keeps that
+    // bookkeeping honest as well as returning a usable name.
+    if (program == 0 && RepairHostContextOnce()) {
+        program = GLES.glCreateProgram();
+        if (program != 0) {
+            LOG_W_FORCE("glCreateProgram returned 0 until MobileGLES bound a fallback EGL context, then returned %u. "
+                        "The calling thread had no current EGL context.",
+                        program);
+        }
+    }
+
     // Track in state manager (virtual == real for programs)
     auto &ss = GLState.shader;
     ss.programMap[program] = program;

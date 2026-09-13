@@ -271,11 +271,11 @@ void init_settings() {
     // drops when idle" describes: the cost is per call, so it tracks the draw
     // and upload rate and disappears when the renderer stops.
     //
-    // What turning it off costs is correctness in one specific situation: a GL
-    // call from a thread with no current EGL context goes straight to the host
-    // and is silently discarded. That is what 26.3-pre-3 hit. Its startup
-    // queries the device before the application has bound a context, and every
-    // answer came back empty:
+    // What turning it off used to cost is the reason for everything else in this
+    // commit. A GL call from a thread with no current EGL context goes straight
+    // to the host and is silently discarded, and 26.3-pre-3 queries the device
+    // at startup before the application has bound a context. Every answer came
+    // back empty:
     //   glGetString(GL_RENDERER) -> NULL
     //   glGetIntegerv(GL_MAX_TEXTURE_SIZE / GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT /
     //                 GL_MAX_TEXTURE_MAX_ANISOTROPY) -> 0
@@ -284,11 +284,30 @@ void init_settings() {
     // the pipeline compiled "shader 0", got no info log, and Minecraft threw
     // "Failed to find or load pipeline minecraft:pipeline/gui".
     //
-    // So the default is a trade, not a bug fix: the common case runs without
-    // the per-call tax, and a build that hits the 26.3-pre-3 startup can put
-    // it back with "hostContextGuard": 1 in MG/settings.json. The resolved
-    // value is logged unconditionally at the end of init_settings() so this is
-    // one line in latest.log away, rather than a silent default.
+    // Those four sites are now each repaired where the failure is observed,
+    // rather than prevented globally:
+    //   glCreateShader / glCreateProgram  → RepairHostContextOnce() on a 0 result
+    //                                       (egl/loader.cpp)
+    //   glGetString / glGetIntegerv /
+    //   glGetInteger64v                   → same call on an empty result
+    //                                       (gl/getter.cpp), plus the
+    //                                       kLimitFallbacks table as a last resort
+    //   glMapBufferRange                  → shadow mapping, which does not depend
+    //                                       on the driver answering at all
+    // So the guard is no longer what keeps 26.3-pre-3 alive, and leaving it off
+    // no longer trades correctness for speed — it is a choice about *when* to
+    // pay, and the repair path pays only on a thread that has actually failed.
+    //
+    // Worth recording for whoever touches this next: the repair sites above were
+    // dead code while the guard was on, because they gate on
+    // ScopedHostContext::Bound(), which is false unless the guard is enabled.
+    // The guard was therefore load-bearing in a way nothing stated. That
+    // coupling is gone; RepairHostContextOnce() works with the guard off.
+    //
+    // "hostContextGuard": 1 in MG/settings.json still restores the eager guard
+    // for anyone who wants the old always-on behaviour, e.g. to compare. The
+    // resolved value is logged unconditionally at the end of init_settings() so
+    // this is one line in latest.log away, rather than a silent default.
     global_settings.host_context_guard = (hostContextGuardCfg > 0);
     // OFF by default, matching the port source.
     //
@@ -370,10 +389,11 @@ void init_settings() {
     // work this layer adds, and both now default OFF (see the comments at
     // their assignment above). Reported at a level that always reaches
     // latest.log rather than the LOG_V stream, because a user chasing CPU
-    // load — or the 26.3-pre-3 startup it can reintroduce — needs to see
-    // which way they resolved without first having to enable verbose logging.
-    LOG_W_FORCE("[MobileGlues] Setting: hostContextGuard            = %i (absent => 0; set "
-                "\"hostContextGuard\": 1 in MG/settings.json if a startup query comes back empty)",
+    // load — or the 26.3-pre-3 startup that used to depend on the guard — needs
+    // to see which way they resolved without first enabling verbose logging.
+    LOG_W_FORCE("[MobileGlues] Setting: hostContextGuard            = %i (absent => 0; leaving it off is the "
+                "supported default — 0 lets a failed call be repaired where it is observed, 1 restores the "
+                "per-call check in front of every entry point)",
                 static_cast<int>(global_settings.host_context_guard))
     LOG_W_FORCE("[MobileGlues] Setting: cpuSwizzle                  = %i (absent => 0; set \"cpuSwizzle\": 1 to force "
                 "per-pixel BGRA reordering on upload)",

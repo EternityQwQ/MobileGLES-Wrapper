@@ -259,6 +259,36 @@ static GLenum detect_shader_type_from_source(const ShaderSourceInfo& info) {
 GLuint glCreateShader(GLenum type) {
     ScopedHostContext __hostCtx;
     GLuint shader = GLES.glCreateShader(type);
+
+    // The 26.3-pre-3 crash, fixed at the point of failure rather than avoided
+    // globally.
+    //
+    // A host driver handed a call from a thread with no current EGL context
+    // does nothing and reports nothing, so this returns 0 — and 0 is not a
+    // value any caller can survive. That release's startup queries the device
+    // before the application has bound a context, so it got 0 here, compiled
+    // "shader 0", received no info log, and died with
+    //   Failed to find or load pipeline minecraft:pipeline/gui
+    //
+    // The eager guard above is supposed to prevent this, but it only helps when
+    // it is enabled, and enabling it means one eglGetCurrentContext() in front
+    // of ~127 entry points — which is the CPU cost this branch set out to stop
+    // paying. Repairing here instead costs nothing until the failure actually
+    // happens: a shader creation that succeeds (the overwhelming majority, on
+    // any thread that has a context) never reaches the repair at all.
+    //
+    // 0 is an unambiguous signal — there is no valid shader name 0 — so unlike
+    // the limit queries in getter.cpp this needs no whitelist to tell a real 0
+    // from a missing context.
+    if (shader == 0 && RepairHostContextOnce()) {
+        shader = GLES.glCreateShader(type);
+        if (shader != 0) {
+            LOG_W_FORCE("glCreateShader returned 0 until MobileGLES bound a fallback EGL context, then returned %u "
+                        "(type=0x%x). The calling thread had no current EGL context.",
+                        shader, type);
+        }
+    }
+
     if (shader != 0) {
         update_shader_cache(shader, type, /*set_type=*/1, /*set_essl_verified=*/0);
 
