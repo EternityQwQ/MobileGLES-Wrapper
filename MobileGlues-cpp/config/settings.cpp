@@ -817,20 +817,6 @@ void init_settings_post() {
     md_caps.multiarrays = mg_multi_draw_arrays_ext_available();
     md_caps.compute = compute;
 
-    // The dump below prints only the *filtered* chain: when every batched
-    // backend drops out of it there is nothing left there to explain why.
-    // One unconditional line at init answers "is multiindirect live on this
-    // device" without asking anyone for a debug-level log. LOG_W (non-FORCE)
-    // is gated behind GLOBAL_DEBUG and a release build silences it, which is
-    // exactly how a failed dlsym stayed invisible.
-    LOG_W_FORCE("multidraw caps: GL %d.%d coreIndirect=%p/%p EXT_multi_draw_indirect=%d EXTIndirect=%p/%p -> "
-                "multiindirect(elements=%d arrays=%d) multiarrays=%d multibasevertex=%d compute=%d",
-                g_gles_caps.major, g_gles_caps.minor, (void*)GLES.glMultiDrawElementsIndirect,
-                (void*)GLES.glMultiDrawArraysIndirect, (int)g_gles_caps.GL_EXT_multi_draw_indirect,
-                (void*)GLES.glMultiDrawElementsIndirectEXT, (void*)GLES.glMultiDrawArraysIndirectEXT,
-                (int)md_caps.multiindirect_elements, (int)md_caps.multiindirect_arrays, (int)md_caps.multiarrays,
-                (int)md_caps.multibasevertex, (int)md_caps.compute)
-
     // Filter each entry's requested order down to what this device can run. The
     // result is the runtime fallback chain; its first item is the resolved
     // backend. Unroll survives for the three list-taking entry points because it

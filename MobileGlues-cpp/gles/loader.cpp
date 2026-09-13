@@ -859,36 +859,6 @@ void init_target_gles() {
     INIT_GLES_FUNC(glMultiDrawElementsIndirect)
     INIT_GLES_FUNC(glMultiDrawElementsBaseVertexEXT)
 
-    // The primary handle is libGLESv3.so, and on some devices its shim stops
-    // exporting at an earlier ES minor even though the same vendor driver
-    // implements 3.2. A null here silently kills every batched multidraw
-    // backend: the failure path logs through LOG_W, which a release build
-    // never prints, and the settings dump still shows an order -- just one
-    // without "multiindirect" in it.
-    //
-    // libGLESv2.so points at the same vendor driver and on Android 10+ exports
-    // the full cumulative 3.x symbol table, so re-ask it before giving up.
-    // eglGetProcAddress is not an option: it forwards to dlsym(RTLD_DEFAULT),
-    // which would find this library's own glMultiDrawElementsIndirect and
-    // recurse (see multidraw.cpp for the same reasoning on the EXT names).
-    if (!GLES.glMultiDrawArraysIndirect || !GLES.glMultiDrawElementsIndirect) {
-        static const char* v2_names[] = {"libGLESv2", nullptr};
-        void* v2 = open_lib(v2_names, nullptr);
-        if (v2) {
-            if (!GLES.glMultiDrawArraysIndirect)
-                GLES.glMultiDrawArraysIndirect = (glMultiDrawArraysIndirect_PTR)dlsym(v2, "glMultiDrawArraysIndirect");
-            if (!GLES.glMultiDrawElementsIndirect)
-                GLES.glMultiDrawElementsIndirect =
-                    (glMultiDrawElementsIndirect_PTR)dlsym(v2, "glMultiDrawElementsIndirect");
-        }
-    }
-    // Unconditional on purpose: this one line answers "is batched indirect
-    // even resolved" without asking the user for a debug-level log.
-    LOG_I("multidraw: core batched indirect resolved: glMultiDrawArraysIndirect=%p glMultiDrawElementsIndirect=%p "
-          "(EXT names: %p/%p)",
-          (void*)GLES.glMultiDrawArraysIndirect, (void*)GLES.glMultiDrawElementsIndirect,
-          (void*)GLES.glMultiDrawArraysIndirectEXT, (void*)GLES.glMultiDrawElementsIndirectEXT)
-
     LOG_D("glMultiDrawArraysIndirectEXT() @ 0x%x", GLES.glMultiDrawArraysIndirectEXT)
     LOG_D("glMultiDrawElementsIndirectEXT() @ 0x%x", GLES.glMultiDrawElementsIndirectEXT)
     LOG_D("glMultiDrawElementsBaseVertexEXT() @ 0x%x", GLES.glMultiDrawElementsBaseVertexEXT)
