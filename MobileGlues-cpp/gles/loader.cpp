@@ -851,6 +851,12 @@ void init_target_gles() {
 
     INIT_GLES_FUNC(glMultiDrawArraysIndirectEXT)
     INIT_GLES_FUNC(glMultiDrawElementsIndirectEXT)
+    // GLES 3.2 core batched indirect. Resolved alongside the EXT names: a
+    // driver that reports 3.2 without advertising GL_EXT_multi_draw_indirect
+    // (Adreno does exactly this) still exports the core symbols, and dlsym
+    // finds them.
+    INIT_GLES_FUNC(glMultiDrawArraysIndirect)
+    INIT_GLES_FUNC(glMultiDrawElementsIndirect)
     INIT_GLES_FUNC(glMultiDrawElementsBaseVertexEXT)
 
     LOG_D("glMultiDrawArraysIndirectEXT() @ 0x%x", GLES.glMultiDrawArraysIndirectEXT)

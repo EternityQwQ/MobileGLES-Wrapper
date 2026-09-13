@@ -770,12 +770,20 @@ void init_settings_post() {
     const bool has_bv_ext =
         g_gles_caps.GL_EXT_draw_elements_base_vertex || g_gles_caps.GL_OES_draw_elements_base_vertex;
 
-    // A capability counts only when the extension string *and* the resolved entry
-    // point agree. The GLES loader uses a plain dlsym, so a driver can advertise
+    // A capability counts only when the entry point *and* something that vouches
+    // for it agree. The GLES loader uses a plain dlsym, so a driver can advertise
     // GL_EXT_multi_draw_indirect while the symbol is missing from the library that
     // was actually opened; trusting the string alone meant a null jump on the
     // first frame that issued a multi-draw.
-    const bool multidraw = g_gles_caps.GL_EXT_multi_draw_indirect && GLES.glMultiDrawElementsIndirectEXT != nullptr;
+    //
+    // The GLES 3.2 core forms count without the string: the batched indirect
+    // entry points were promoted from EXT_multi_draw_indirect into 3.2 core, so
+    // a driver that reports 3.2 exports them whether or not it lists the
+    // extension. Adreno is exactly that case; requiring string+EXT-pointer left
+    // it with no batched backend at all and degraded every multi-draw to
+    // per-sub-draw loops — a large per-frame CPU cost for nothing.
+    const bool multidraw = (has_es32 && GLES.glMultiDrawElementsIndirect != nullptr) ||
+                           (g_gles_caps.GL_EXT_multi_draw_indirect && GLES.glMultiDrawElementsIndirectEXT != nullptr);
     const bool basevertex = (has_bv_ext || has_es32) && GLES.glDrawElementsBaseVertex != nullptr;
     const bool indirect = has_es31 && GLES.glDrawElementsIndirect != nullptr;
     // EXT/OES_draw_elements_base_vertex also define the multi-draw form, whose
@@ -803,7 +811,8 @@ void init_settings_post() {
     md_caps.indirect_arrays = has_es31 && GLES.glDrawArraysIndirect != nullptr;
     md_caps.multiindirect_elements = multidraw;
     md_caps.multiindirect_arrays =
-        g_gles_caps.GL_EXT_multi_draw_indirect && GLES.glMultiDrawArraysIndirectEXT != nullptr;
+        (has_es32 && GLES.glMultiDrawArraysIndirect != nullptr) ||
+        (g_gles_caps.GL_EXT_multi_draw_indirect && GLES.glMultiDrawArraysIndirectEXT != nullptr);
     md_caps.multibasevertex = multibasevertex;
     md_caps.multiarrays = mg_multi_draw_arrays_ext_available();
     md_caps.compute = compute;

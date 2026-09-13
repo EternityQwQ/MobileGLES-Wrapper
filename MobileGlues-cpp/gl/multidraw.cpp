@@ -328,9 +328,28 @@ bool mg_multi_draw_elements_basevertex_ext_available() {
 // points re-checks at the call site rather than caching: those entry points are
 // reachable by a direct dlsym through glXGetProcAddress, so resolution is not
 // the only path in.
+//
+// The GLES 3.2 core forms count too. The extension string is required only for
+// the EXT names: a 3.2 driver exports the core glMultiDrawArraysIndirect /
+// glMultiDrawElementsIndirect whether or not it advertises the extension, and
+// Adreno is exactly that case — 3.2, no EXT_multi_draw_indirect string.
+// Requiring the string AND the EXT pointer made every batched indirect backend
+// unavailable on it, so every multi-draw degraded to per-sub-draw submission.
 static bool mg_multi_draw_indirect_available() {
-    return g_gles_caps.GL_EXT_multi_draw_indirect != 0 && GLES.glMultiDrawArraysIndirectEXT != nullptr &&
-           GLES.glMultiDrawElementsIndirectEXT != nullptr;
+    const bool core = GLES.glMultiDrawArraysIndirect != nullptr && GLES.glMultiDrawElementsIndirect != nullptr;
+    const bool ext = g_gles_caps.GL_EXT_multi_draw_indirect != 0 && GLES.glMultiDrawArraysIndirectEXT != nullptr &&
+                     GLES.glMultiDrawElementsIndirectEXT != nullptr;
+    return core || ext;
+}
+
+// The batched indirect entry point to call, core name first. Call only after
+// mg_multi_draw_indirect_available() answered true — one of the two is
+// guaranteed non-null then.
+static inline glMultiDrawArraysIndirect_PTR md_arrays_indirect_fn() {
+    return GLES.glMultiDrawArraysIndirect ? GLES.glMultiDrawArraysIndirect : GLES.glMultiDrawArraysIndirectEXT;
+}
+static inline glMultiDrawElementsIndirect_PTR md_elements_indirect_fn() {
+    return GLES.glMultiDrawElementsIndirect ? GLES.glMultiDrawElementsIndirect : GLES.glMultiDrawElementsIndirectEXT;
 }
 
 // ---------------------------------------------------------------------------
@@ -1439,7 +1458,7 @@ void mg_glMultiDrawElements_multiindirect(GLenum mode, const GLsizei* count, GLe
             return;
         }
 
-        GLES.glMultiDrawElementsIndirectEXT(mode, type, 0, primcount, 0);
+        md_elements_indirect_fn()(mode, type, 0, primcount, 0);
     }
 
     CHECK_GL_ERROR
@@ -1469,7 +1488,7 @@ void mg_glMultiDrawElementsBaseVertex_multiindirect(GLenum mode, GLsizei* counts
             return;
         }
 
-        GLES.glMultiDrawElementsIndirectEXT(mode, type, 0, primcount, 0);
+        md_elements_indirect_fn()(mode, type, 0, primcount, 0);
     }
 
     CHECK_GL_ERROR
@@ -1764,7 +1783,7 @@ void mg_glMultiDrawArrays_multiindirect(GLenum mode, const GLint* first, const G
     LOG()
     multidraw_check_context();
 
-    if (g_scratch.arrays_multiindirect_state == md_probe_state_t::Failed || !GLES.glMultiDrawArraysIndirectEXT) {
+    if (g_scratch.arrays_multiindirect_state == md_probe_state_t::Failed || !md_arrays_indirect_fn()) {
         md_fall_arrays(md_backend_t::MultiIndirect, mode, first, count, drawcount);
         return;
     }
@@ -1813,7 +1832,7 @@ void mg_glMultiDrawArrays_multiindirect(GLenum mode, const GLint* first, const G
         const bool probing = (g_scratch.arrays_multiindirect_state == md_probe_state_t::Unprobed);
         if (probing) mg_md_drain();
 
-        GLES.glMultiDrawArraysIndirectEXT(mode, 0, drawcount, 0);
+        md_arrays_indirect_fn()(mode, 0, drawcount, 0);
 
         if (probing) {
             const GLenum err = mg_md_check();
@@ -1855,7 +1874,7 @@ void glMultiDrawArraysIndirect(GLenum mode, const void* indirect, GLsizei drawco
         multidraw_backend_of(md_entry_t::ArraysIndirect) == md_backend_t::MultiIndirect && mg_multi_draw_indirect_available();
 
     if (want_batch) {
-        GLES.glMultiDrawArraysIndirectEXT(mode, indirect, drawcount, stride);
+        md_arrays_indirect_fn()(mode, indirect, drawcount, stride);
     } else if (GLES.glDrawArraysIndirect) {
         // GL 4.6 sec. 10.5: stride 0 means the commands are tightly packed.
         const GLsizei s = stride ? stride : static_cast<GLsizei>(sizeof(draw_arrays_indirect_command_t));
@@ -1895,7 +1914,7 @@ void glMultiDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect,
                             mg_multi_draw_indirect_available();
 
     if (want_batch) {
-        GLES.glMultiDrawElementsIndirectEXT(mode, type, indirect, drawcount, stride);
+        md_elements_indirect_fn()(mode, type, indirect, drawcount, stride);
     } else if (GLES.glDrawElementsIndirect) {
         const GLsizei s = stride ? stride : static_cast<GLsizei>(sizeof(draw_elements_indirect_command_t));
         const uintptr_t base = reinterpret_cast<uintptr_t>(indirect);
@@ -2733,9 +2752,9 @@ static bool mg_indirect_count(GLenum mode, GLenum type, bool is_elements, const 
 
     if (mg_multi_draw_indirect_available()) {
         if (is_elements)
-            GLES.glMultiDrawElementsIndirectEXT(mode, type, 0, maxdrawcount, 0);
+            md_elements_indirect_fn()(mode, type, 0, maxdrawcount, 0);
         else
-            GLES.glMultiDrawArraysIndirectEXT(mode, 0, maxdrawcount, 0);
+            md_arrays_indirect_fn()(mode, 0, maxdrawcount, 0);
     } else if (is_elements ? GLES.glDrawElementsIndirect != nullptr : GLES.glDrawArraysIndirect != nullptr) {
         // Commands past the count carry instanceCount 0, so walking all of them
         // draws exactly the same thing, one call at a time.
