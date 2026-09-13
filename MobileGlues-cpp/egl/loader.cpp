@@ -907,9 +907,74 @@ void UnbindFallbackEGLContext() {}
 // generation change is still caught, but by the caller noticing a bad result
 // and calling back in — which is the contract: this function is only ever
 // reached because something already failed.
+// ---------------------------------------------------------------------------
+// The shared answer to "does this thread have a context?"
+//
+// Both ScopedHostContext (asking before a call) and RepairHostContextOnce()
+// (asking after one failed) need this, and they must agree: a thread repaired
+// through one path has to be considered usable by the other, or every later
+// entry point re-runs the ladder that the first one already paid for.
+//
+// So there is one memory, not two. It is per thread and per generation:
+//
+//   t_ctx_settled / t_ctx_settled_generation
+//       "The question was answered for this generation." Set whether the
+//       outcome was success or failure, because both are equally expensive to
+//       re-derive and neither can change until the application replaces its
+//       render target. It is NOT a claim that a context is bound — that is read
+//       from t_fb, the only thing that knows it.
+//
+// The generation is consulted to detect a *change*. A bare flag would be wrong:
+// when the application swaps its surface, a context that was current can stop
+// being current, and a thread that kept believing otherwise would skip every
+// future repair while all its calls were discarded — the silent failure this
+// whole mechanism exists to prevent.
+//
+// Note the deliberate weakness: once a thread is settled, this never calls
+// eglGetCurrentContext(). That is the entire point — it is the per-call cost
+// this branch set out to remove. A context lost without a generation change is
+// still caught, but by the caller noticing a bad result and asking again,
+// which is what RepairHostContextOnce() is for.
+// ---------------------------------------------------------------------------
+// The state both entry points read. File scope rather than function-local so
+// EnsureHostContextSettled() can observe it without duplicating the memory —
+// two copies of this flag is exactly the disagreement this design avoids.
+static thread_local bool t_ctx_settled = false;
+static thread_local unsigned t_ctx_settled_generation = 0;
+
+bool EnsureHostContextSettled(unsigned generation) {
+    return t_ctx_settled && t_ctx_settled_generation == generation;
+}
+
+bool EnsureHostContextOnce() {
+    const unsigned gen = mg_egl_app_target_generation();
+    if (EnsureHostContextSettled(gen)) return false;  // answered already
+
+    // Ask the state, not the ladder's return value.
+    //
+    // BindFallbackEGLContextIfNeeded() returns false in two situations that
+    // mean opposite things: "could not bind" and "did not need to, this
+    // generation was already handled". Treating the second as a failure is not
+    // hypothetical — it is what the first version of the repair did, and it
+    // made a thread that already had a context re-run the whole ladder
+    // (eglMakeCurrent included) on every later call while logging that no
+    // context could be bound for a thread that had one.
+    const bool had_context = HostContextIsBoundOnThisThread();
+    if (!had_context) {
+        BindFallbackEGLContextIfNeeded();
+    }
+
+    t_ctx_settled = true;
+    t_ctx_settled_generation = gen;
+
+    // True only when this call is what installed the context.
+    return !had_context && HostContextIsBoundOnThisThread();
+}
+
+// ---------------------------------------------------------------------------
+// RepairHostContextOnce() — the same question, asked after a failure
+// ---------------------------------------------------------------------------
 bool RepairHostContextOnce() {
-    static thread_local unsigned t_repair_ok_generation = 0;
-    static thread_local bool t_repair_ok = false;
     // Two independent one-shot guards, not one shared counter. They report two
     // different faults, and a single counter made the first to fire silence the
     // other — which meant a thread that once failed for an unrelated reason
@@ -921,37 +986,42 @@ bool RepairHostContextOnce() {
     static thread_local bool t_reported_no_context = false;
 
     const unsigned gen = mg_egl_app_target_generation();
-    if (t_repair_ok && t_repair_ok_generation == gen) return false;  // already resolved for this generation
-
-    // Ask the state, not the ladder's return value.
-    //
-    // The ladder returns false in two situations that mean opposite things:
-    // "could not bind" and "did not need to, this generation was already
-    // handled". Treating the second as a failure is not a hypothetical — it is
-    // what the first version of this function did, and it produced exactly the
-    // behaviour this mechanism exists to prevent: a thread whose context was
-    // already bound never recorded success, so every later failed call re-ran
-    // the whole ladder (eglMakeCurrent included) and logged
-    // "no fallback context could be bound" about a thread that had one.
-    //
-    // So: enter the ladder only if this thread really has nothing, and judge the
-    // outcome by the state afterwards.
     const bool was_bound_before = HostContextIsBoundOnThisThread();
-    if (!was_bound_before) {
-        BindFallbackEGLContextIfNeeded();
+
+    if (was_bound_before && EnsureHostContextSettled(gen)) {
+        // A context is present and the question is settled for this generation.
+        // The caller's failure is not the missing-context mode; say so once and
+        // let it retry, because a 0 from glCreateShader on a thread that HAS a
+        // context is a different bug worth one line.
+        if (!t_reported_other_cause) {
+            t_reported_other_cause = true;
+            LOG_W_FORCE("RepairHostContextOnce: [%s] a host call returned a failure value while a context WAS current "
+                        "on this thread; the call has been retried, and if it fails again the cause is elsewhere.",
+                        CurrentThreadLabel());
+        }
+        return true;
     }
 
-    t_repair_ok = true;
-    t_repair_ok_generation = gen;
+    if (!EnsureHostContextOnce()) {
+        if (was_bound_before) {
+            // Already had one; nothing was installed, but the thread is usable.
+            if (!t_reported_other_cause) {
+                t_reported_other_cause = true;
+                LOG_W_FORCE("RepairHostContextOnce: [%s] a host call returned a failure value while a context WAS "
+                            "current on this thread; the call has been retried, and if it fails again the cause is "
+                            "elsewhere.",
+                            CurrentThreadLabel());
+            }
+            return true;
+        }
 
-    if (!HostContextIsBoundOnThisThread()) {
-        // Still nothing. The caller is going to fail the operation anyway, and
-        // the outcome is remembered for the generation so the ladder is not
-        // re-run, eglMakeCurrent and all, on every subsequent call.
+        // Nothing could be installed. The caller is going to fail the operation
+        // anyway, and the outcome is remembered for the generation so the ladder
+        // is not re-run, eglMakeCurrent and all, on every subsequent call.
         //
-        // Reported once per thread. A thread that cannot get a context has now
+        // Reported once per thread: a thread that cannot get a context has now
         // been proven to be in that state by an actual failure, which is
-        // stronger evidence than the eager guard's periodic poke.
+        // stronger evidence than a periodic poke would be.
         if (!t_reported_no_context) {
             t_reported_no_context = true;
             LOG_W_FORCE("RepairHostContextOnce: [%s] a host call failed and this thread still has no context; "
@@ -962,23 +1032,7 @@ bool RepairHostContextOnce() {
         return false;
     }
 
-    // A context is bound, so the caller must retry exactly once. Whether this
-    // function bound it or found it already there changes only what the log line
-    // means, not what the caller does:
-    //
-    //   - bound here  → the failure was the missing-context mode this exists for;
-    //   - already there → the failure has another cause, and saying so once is
-    //     worth a line, because a 0 from glCreateShader on a thread that HAS a
-    //     context is a different bug.
-    //
-    // The two cases are told apart by whether the ladder was entered at all,
-    // which is decided before it runs rather than guessed from its result.
-    if (!t_reported_other_cause && was_bound_before) {
-        t_reported_other_cause = true;
-        LOG_W_FORCE("RepairHostContextOnce: [%s] a host call returned a failure value while a context WAS current on "
-                    "this thread; the call has been retried, and if it fails again the cause is elsewhere.",
-                    CurrentThreadLabel());
-    }
+    // This call installed the context, so the caller must retry exactly once.
     return true;
 }
 

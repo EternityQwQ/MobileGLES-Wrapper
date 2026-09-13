@@ -251,31 +251,79 @@ void mg_egl_note_guarded_call();
 // structural difference left between this library and the port source that runs
 // at the frame rate this one does not.
 //
-// Off means: no context is installed, and a call arriving on a thread without
-// one is passed through exactly as the port source would pass it — except where
-// a caller asks for a repair explicitly, see RepairHostContextOnce() below.
+// Off means: the per-call check is not made. A context is still installed on a
+// thread that does not have one — see ScopedHostContext below, which asks at
+// most once per thread per render target rather than once per call. Turning it
+// off changes *when* the question is asked, not whether a worker ever gets a
+// context.
 bool mg_egl_host_context_guard_enabled();
+
+// EnsureHostContextOnce() — the shared answer to "does this thread have a
+// context?", remembered per thread and per render target.
+//
+// Declared here rather than exposed as a second mechanism because
+// ScopedHostContext and RepairHostContextOnce() below are the same question
+// asked from two directions: the first from an entry point about to run
+// (prevention), the second from one that has already seen a bad result
+// (repair). Both must settle on the same answer, or a thread can be repaired
+// by one and considered broken by the other.
+//
+// Returns true when the calling thread has a context as a result of this call
+// having established it — i.e. the caller was missing one and now is not.
+// Returns false when the thread already had one, or when none could be
+// obtained. Cost after the first call on a generation: one thread-local read.
+bool EnsureHostContextOnce();
+
+// Whether the question has already been answered on this thread for `generation`.
+// Exposed so a caller can distinguish "this thread is fine, nothing to do" from
+// "we tried and could not install one" without asking the driver again.
+bool EnsureHostContextSettled(unsigned generation);
 
 class ScopedHostContext {
 public:
-    ScopedHostContext() : bound_(mg_egl_host_context_guard_enabled() ? BindFallbackEGLContextIfNeeded() : false) {
-        // Only when the guard actually ran. This used to be called
-        // unconditionally, which meant every GL call still paid a thread-local
-        // increment, a bitmask test and an integer modulo even with the guard
-        // switched off — work with no remaining purpose, since the bookkeeping
-        // it feeds (the watchdog's call rate) describes a guard that is not
-        // running. The cost was small against a frame, but it was pure waste on
-        // the hottest path in the library, and it made "guard off" a weaker
-        // claim than it looked.
-        if (bound_ || mg_egl_host_context_guard_enabled()) mg_egl_note_guarded_call();
+    ScopedHostContext() : bound_(false) {
+        if (mg_egl_host_context_guard_enabled()) {
+            // Guard on: ask the driver on every call, as before. This is the
+            // expensive mode and the reason the default changed.
+            bound_ = BindFallbackEGLContextIfNeeded();
+            mg_egl_note_guarded_call();
+            return;
+        }
+
+        // Guard off — the default. This used to do NOTHING, which is what broke
+        // rendering: with the guard on, every entry point re-checked and a
+        // worker thread that had no context got one installed by whichever call
+        // happened first, so the whole shader pipeline (create → source →
+        // compile → link) ran on a worker that had a context by the time it
+        // needed one. Turning the guard off removed that accident without
+        // replacing it, so glCreateShader was repaired (it was the 26.3-pre-3
+        // crash) while glShaderSource and glCompileShader were not: the source
+        // upload and the compile were silently discarded, every program failed
+        // to link, and the world did not draw — while the UI, which needs none
+        // of those pipelines, kept working.
+        //
+        // The fix is not to go back to asking on every call. A thread needs a
+        // context once; after that the answer cannot change except when the
+        // application replaces its render target (the generation counter). So
+        // this asks at most once per thread per generation and is free
+        // afterwards, which is the same memory RepairHostContextOnce() uses —
+        // deliberately the same, so the two cannot disagree about whether a
+        // thread is usable.
+        bound_ = EnsureHostContextOnce();
+
+        // Only counted when the guard is on: this feeds the watchdog's call
+        // rate, which describes the per-call check that is not running.
     }
     ~ScopedHostContext() {
         if (bound_) UnbindFallbackEGLContext();
     }
     ScopedHostContext(const ScopedHostContext&) = delete;
     ScopedHostContext& operator=(const ScopedHostContext&) = delete;
-    // True when this instance is the one that bound the context, i.e. the
-    // thread had none and any result read before this point is suspect.
+    // True when THIS instance is the one that installed the context, i.e. the
+    // thread had none before it and any result read earlier is suspect. False
+    // when the thread already had one — including on every call after the first
+    // on a generation, which is why this is not "does the thread have a
+    // context".
     bool Bound() const { return bound_; }
 
 private:
