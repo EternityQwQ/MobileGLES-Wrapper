@@ -78,10 +78,17 @@ void init_settings() {
     int bufferCoherentAsFlushCfg = success ? config_get_int("bufferCoherentAsFlush") : -1;
 
 
-    // All four default to ON. A missing key (-1) keeps them enabled; only an
-    // explicit 0 turns one off. They are independent: any combination is
-    // meaningful, and switching one off is meant to be tested against the
-    // others staying on so the difference can be attributed to that one alone.
+    // Read as raw ints (-1 means "key absent", see config_get_int), then each
+    // one is compared against the default its own comment documents below.
+    // They are independent: any combination is meaningful, and switching one
+    // off is meant to be tested against the others staying on so the
+    // difference can be attributed to that one alone.
+    //
+    // The comparison operator is NOT uniform, and that is load-bearing:
+    // config_get_int returns -1 for a missing key, so `!= 0` reads an absent
+    // key as ON while `> 0` reads it as OFF. The two entries below that gate
+    // expensive per-call work (hostContextGuard, cpuSwizzle) therefore use
+    // `> 0`, so that "the user never wrote the key" means "pay nothing".
     int selfPromotionCfg = success ? config_get_int("selfPromotion") : -1;
     int activateOnCreateCfg = success ? config_get_int("activateOnCreate") : -1;
     int hostContextGuardCfg = success ? config_get_int("hostContextGuard") : -1;
@@ -240,23 +247,35 @@ void init_settings() {
     // surface, so that a surface is never left undrawable when SDL reuses its
     // primary window. Every other difference has been ruled out as the cause of
     // the frame-rate gap — the per-call wrapper cost measures 0.0008 ms per
-    // frame against an 8.2 ms gap, the context guard is already off by default,
-    // and the upload paths are identical to the port source's — so this is what
-    // remains to be tested.
+    // frame against an 8.2 ms gap, and the upload paths are identical to the
+    // port source's — so this is what remains to be tested.
     //
-    // Same comparison caveat as hostContextGuard: config_get_int returns -1 for
-    // an absent key, so `!= 0` would read that as on.
+    // Same comparison caveat as the two entries below: config_get_int returns
+    // -1 for an absent key, so `!= 0` would read that as on.
     global_settings.activate_on_create = (activateOnCreateCfg > 0);
-    // On by default again.
+    // OFF by default.
     //
-    // Turning it off was an A/B experiment against the frame-rate gap, and it
-    // did not move the frame rate — the gap turned out to be
-    // buffer_coherent_as_flush (see above). Keeping it off costs correctness
-    // instead: with the guard off, a GL call from a thread that has no current
-    // EGL context goes straight to the host and is silently discarded.
+    // It was ON, and the cost of that decision lands on the path this project
+    // is measured on. The guard installs a context on threads the application
+    // never bound — shader compilation, chunk building — which is real value,
+    // but it pays for it by putting one eglGetCurrentContext() in front of
+    // every one of the ~127 wrapped entry points. The comment below calls that
+    // "one atomic load plus one eglGetCurrentContext() ... almost nothing",
+    // which was an assumption and never a measurement: on this driver the
+    // call is a real round trip into EGL (and through ANGLE/vendor wrappers
+    // beneath it), not the thread-local read it was assumed to be. egl/loader.h
+    // says as much at the definition of the guard.
     //
-    // That is what 26.3-pre-3 hit. Its startup queries the device before the
-    // application has bound a context, and every answer came back empty:
+    // A frame worth of Minecraft issues tens of thousands of these calls, so
+    // the assumption is exactly what "high or pegged CPU while rendering,
+    // drops when idle" describes: the cost is per call, so it tracks the draw
+    // and upload rate and disappears when the renderer stops.
+    //
+    // What turning it off costs is correctness in one specific situation: a GL
+    // call from a thread with no current EGL context goes straight to the host
+    // and is silently discarded. That is what 26.3-pre-3 hit. Its startup
+    // queries the device before the application has bound a context, and every
+    // answer came back empty:
     //   glGetString(GL_RENDERER) -> NULL
     //   glGetIntegerv(GL_MAX_TEXTURE_SIZE / GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT /
     //                 GL_MAX_TEXTURE_MAX_ANISOTROPY) -> 0
@@ -265,11 +284,35 @@ void init_settings() {
     // the pipeline compiled "shader 0", got no info log, and Minecraft threw
     // "Failed to find or load pipeline minecraft:pipeline/gui".
     //
-    // The guard's fast path is one atomic load plus one eglGetCurrentContext()
-    // per GL call, so a thread that already has a context pays almost nothing.
-    // Set "hostContextGuard": 0 in MG/settings.json to disable it.
-    global_settings.host_context_guard = (hostContextGuardCfg != 0);
-    global_settings.cpu_swizzle = (cpuSwizzleCfg != 0);
+    // So the default is a trade, not a bug fix: the common case runs without
+    // the per-call tax, and a build that hits the 26.3-pre-3 startup can put
+    // it back with "hostContextGuard": 1 in MG/settings.json. The resolved
+    // value is logged unconditionally at the end of init_settings() so this is
+    // one line in latest.log away, rather than a silent default.
+    global_settings.host_context_guard = (hostContextGuardCfg > 0);
+    // OFF by default, matching the port source.
+    //
+    // The port source does not do this at all — its glTexSubImage2D builds an
+    // mg_upload_fix_t and hands fix.format / fix.type / fix.pixels straight to
+    // the driver, with no per-pixel work. This library routes the same four
+    // entry points (TexImage2D/3D, TexSubImage2D/3D) through
+    // swizzle_pixels_for_unpack(), which rewrites every pixel on the CPU and
+    // issues four glTexParameteri calls to reset the texture swizzle whenever
+    // it fires.
+    //
+    // That is per-pixel work at upload rate, which is why it tracks rendering
+    // rather than being a startup cost: a resource pack or Sodium streaming
+    // chunk textures pays it on every terrain update. The routine's own probe
+    // used to announce exactly that ("this is a steady per-frame cost, not
+    // startup only"), which means it was observed firing in a real session.
+    //
+    // OFF keeps correctness for the surfaces GLES accepts natively: the enums
+    // are normalised (BGRA -> RGBA, packed -> UNSIGNED_BYTE) and the bytes go
+    // up untouched. What is given up is the case where the bytes genuinely
+    // need rearranging for a format GLES will not take — a resource pack that
+    // uploads BGRA-on-a-host-without-BGRA will be wrong rather than slow.
+    // "cpuSwizzle": 1 in MG/settings.json restores the old behaviour.
+    global_settings.cpu_swizzle = (cpuSwizzleCfg > 0);
     global_settings.proc_address_own = (procAddressOwnCfg != 0);
 
     if (global_settings.angle == AngleMode::Enabled) {
@@ -323,10 +366,18 @@ void init_settings() {
           static_cast<int>(global_settings.self_promotion))
     LOG_V("[MobileGlues] Setting: activateOnCreate            = %i",
           static_cast<int>(global_settings.activate_on_create))
-    LOG_V("[MobileGlues] Setting: hostContextGuard            = %i",
-          static_cast<int>(global_settings.host_context_guard))
-    LOG_V("[MobileGlues] Setting: cpuSwizzle                  = %i",
-          static_cast<int>(global_settings.cpu_swizzle))
+    // These two are the switches that decide how much per-call and per-pixel
+    // work this layer adds, and both now default OFF (see the comments at
+    // their assignment above). Reported at a level that always reaches
+    // latest.log rather than the LOG_V stream, because a user chasing CPU
+    // load — or the 26.3-pre-3 startup it can reintroduce — needs to see
+    // which way they resolved without first having to enable verbose logging.
+    LOG_W_FORCE("[MobileGlues] Setting: hostContextGuard            = %i (absent => 0; set "
+                "\"hostContextGuard\": 1 in MG/settings.json if a startup query comes back empty)",
+                static_cast<int>(global_settings.host_context_guard))
+    LOG_W_FORCE("[MobileGlues] Setting: cpuSwizzle                  = %i (absent => 0; set \"cpuSwizzle\": 1 to force "
+                "per-pixel BGRA reordering on upload)",
+                static_cast<int>(global_settings.cpu_swizzle))
     LOG_V("[MobileGlues] Setting: procAddressOwn              = %i",
           static_cast<int>(global_settings.proc_address_own))
     if (global_settings.custom_gl_version.isEmpty()) {

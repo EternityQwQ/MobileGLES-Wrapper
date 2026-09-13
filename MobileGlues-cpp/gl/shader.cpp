@@ -35,6 +35,8 @@
 #include "../gles/loader.h"
 #include "mg.h"
 #include "GL/gl.h"
+#include <algorithm>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -44,20 +46,66 @@
 // Shader type cache: avoids glGetShaderiv GPU round-trip on every glShaderSource
 // Indexed by shader object ID. Stores the shader type and whether the shader
 // source was previously verified as ESSL (to skip scanShaderSource on re-upload).
+//
+// This is indexed by the application's shader name, so it is shared state
+// between every thread the application compiles on — and it compiles on more
+// than one. Minecraft and every shader pack around it run shader compilation on
+// worker threads, which is precisely why the host-context guard exists in the
+// first place (see egl/loader.h). A bare std::vector here is therefore a race
+// in two separate ways:
+//
+//   1. Two threads that both find `shader >= size` call reserve/resize on the
+//      same vector. That is undefined behaviour, not a stale read — the
+//      reallocation frees the old block while the other thread is indexing into
+//      it. A crash here would present as a random one-off during shader-pack
+//      loading, which is close to unreportable.
+//   2. Even without a realloc, the entries themselves are written without
+//      synchronisation, so a worker can read a half-updated ShaderCacheEntry.
+//
+// A mutex over the whole structure is the right size of fix: these are touched
+// on glCreateShader, glShaderSource and glDeleteShader, i.e. on shader
+// (re)loads, not per draw or per frame. The alternative — thread_local — would
+// be wrong here, because the point of the cache is to share one answer about a
+// shader between the thread that created it and the thread that compiles it;
+// per-thread copies would each pay the glGetShaderiv round trip the cache
+// exists to avoid, and would disagree after glShaderSource updates the type.
+//
+// Growth is by doubling rather than to `shader + 1`: names come from the
+// application and are not dense, so exact-size growth reallocates once per new
+// name and wastes a slot for every skipped id.
 // ============================================================================
 struct ShaderCacheEntry {
     GLenum type = 0;         // cached shader type (GL_VERTEX_SHADER, etc.)
     bool is_essl_verified = false; // true if source was confirmed ESSL
 };
 static std::vector<ShaderCacheEntry> g_shader_cache;
+static std::mutex g_shader_cache_mutex;
 
-static inline ShaderCacheEntry& get_shader_cache(GLuint shader) {
-    if (shader >= g_shader_cache.size()) [[unlikely]]
-        g_shader_cache.resize(shader + 1);
+// Returns a copy, not a reference: call sites hold it across a GL call, and a
+// reference would be invalidated by a concurrent growth in between.
+static ShaderCacheEntry get_shader_cache(GLuint shader) {
+    std::lock_guard<std::mutex> lock(g_shader_cache_mutex);
+    if (shader >= g_shader_cache.size()) {
+        g_shader_cache.resize(std::max<size_t>(shader + 1, g_shader_cache.size() * 2));
+    }
     return g_shader_cache[shader];
 }
 
+// Read-modify-write under one lock. Doing get/modify/put from the call site
+// would let two threads interleave and lose an update, which is the same class
+// of bug this lock was added to stop.
+static void update_shader_cache(GLuint shader, GLenum type, int set_type, int set_essl_verified) {
+    std::lock_guard<std::mutex> lock(g_shader_cache_mutex);
+    if (shader >= g_shader_cache.size()) {
+        g_shader_cache.resize(std::max<size_t>(shader + 1, g_shader_cache.size() * 2));
+    }
+    ShaderCacheEntry& e = g_shader_cache[shader];
+    if (set_type) e.type = type;
+    if (set_essl_verified) e.is_essl_verified = true;
+}
+
 void invalidate_shader_cache(GLuint shader) {
+    std::lock_guard<std::mutex> lock(g_shader_cache_mutex);
     if (shader < g_shader_cache.size()) {
         g_shader_cache[shader] = ShaderCacheEntry{};
     }
@@ -212,8 +260,7 @@ GLuint glCreateShader(GLenum type) {
     ScopedHostContext __hostCtx;
     GLuint shader = GLES.glCreateShader(type);
     if (shader != 0) {
-        auto& cacheEntry = get_shader_cache(shader);
-        cacheEntry.type = type;
+        update_shader_cache(shader, type, /*set_type=*/1, /*set_essl_verified=*/0);
 
         // Track in unified state manager
         auto &ss = GLState.shader;
@@ -249,7 +296,7 @@ void glCompileShader(GLuint shader) {
         GLES.glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &infoLen);
         if (infoLen > 1) {
             // Include shader type from cache for better diagnostics
-            GLenum shaderType = (shader < g_shader_cache.size()) ? g_shader_cache[shader].type : 0;
+            GLenum shaderType = get_shader_cache(shader).type;
             std::vector<char> log(infoLen);
             GLES.glGetShaderInfoLog(shader, infoLen, nullptr, log.data());
             LOG_I("[MobileGLES] Shader %d (type=%d) compilation failed: %s", shader, shaderType, log.data())
@@ -279,22 +326,26 @@ void glShaderSource(GLuint shader, GLsizei count, const GLchar* const* string, c
     LOG_D("glShaderSource hook, shader=%d, count=%d", shader, count)
 
     if (count <= 0 || !string || !string[0]) {
-        // Invalidate cache when clearing source
-        auto& entry = get_shader_cache(shader);
-        entry.is_essl_verified = false;
+        // Invalidate cache when clearing source. A full entry reset (type 0,
+        // verified false), not just the flag: the type recorded for this name
+        // is about to stop matching whatever source is uploaded next, and
+        // Step 1 below re-queries glGetShaderiv when it reads 0. Clearing the
+        // flag alone left the stale type in place, which is what let a reused
+        // name keep the previous shader's type.
+        invalidate_shader_cache(shader);
         GLES.glShaderSource(shader, count, string, length);
         return;
     }
 
     const char* raw_code = string[0];
-    auto& cacheEntry = get_shader_cache(shader);
+    ShaderCacheEntry cacheEntry = get_shader_cache(shader);
 
     // Step 1: Get shader type — use cache to avoid glGetShaderiv GPU round-trip
     GLenum shaderType = cacheEntry.type;
     if (shaderType == 0) [[unlikely]] {
         // First call: query type from GLES and cache it
         GLES.glGetShaderiv(shader, GL_SHADER_TYPE, (GLint*)&shaderType);
-        cacheEntry.type = shaderType;
+        update_shader_cache(shader, shaderType, /*set_type=*/1, /*set_essl_verified=*/0);
     }
 
     // Step 2: Fast path — if previously verified as ESSL, skip scan and pass through
@@ -314,7 +365,7 @@ void glShaderSource(GLuint shader, GLsizei count, const GLchar* const* string, c
         GLenum detected = detect_shader_type_from_source(sourceInfo);
         if (detected != GL_FRAGMENT_SHADER) {
             shaderType = detected;
-            cacheEntry.type = shaderType; // update cache with detected type
+            update_shader_cache(shader, shaderType, /*set_type=*/1, /*set_essl_verified=*/0);
             LOG_I("[MobileGLES] Detected non-fragment shader type from source: %d", shaderType)
         }
     }
@@ -324,7 +375,8 @@ void glShaderSource(GLuint shader, GLsizei count, const GLchar* const* string, c
     // Step 5: Check if already an ES-compatible shader → native pass-through
     if (is_direct_shader(sourceInfo)) {
         LOG_D("Direct ES shader (ESSL 100/300/310/320), passing through")
-        cacheEntry.is_essl_verified = true; // mark as verified ESSL for future calls
+        // mark as verified ESSL for future calls
+        update_shader_cache(shader, shaderType, /*set_type=*/0, /*set_essl_verified=*/1);
         GLES.glShaderSource(shader, count, string, length);
         return;
     }
