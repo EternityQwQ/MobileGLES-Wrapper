@@ -71,6 +71,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <ctime>
 #include <limits>
 #include <string>
 #include <vector>
@@ -557,6 +558,19 @@ struct md_scratch_state_t {
     GLint count_loc_cntoff = -1;
     GLint count_loc_dstwords = -1;
 
+    // Cached shader-storage bindings for the fusion scope. Every writer of the
+    // SSBO binding points outside this file goes through gl/buffer.cpp, which
+    // flips ssbo_dirty via mg_multidraw_ssbo_touched(); while the flag is clear
+    // the cache is exactly what the driver holds, because the only other writer
+    // is this file's own scratch binding, which every compute path restores
+    // before returning. Reading five bindings back from the driver per batch
+    // was the single largest fixed cost of the fused draw.
+    bool ssbo_dirty = true; // the first batch on a context must ask the driver
+    GLint ssbo_generic = 0;
+    GLint ssbo_base[4] = {};
+    GLint64 ssbo_start[4] = {};
+    GLint64 ssbo_size[4] = {};
+
     // Probe latches for the extension-provided batched backends.
     //
     // One tri-state rather than a separate "probed" flag and "failed" flag: those
@@ -571,6 +585,17 @@ struct md_scratch_state_t {
 };
 
 static md_scratch_state_t g_scratch;
+
+// Called by gl/buffer.cpp whenever an entry point touches a shader-storage
+// binding (glBindBuffer, glBindBufferBase/Range, buffer deletion) and by the
+// atomic-counter emulation, which binds its buffers as SSBOs behind the
+// wrapper's back. The next fusion scope must re-read the bindings from the
+// driver instead of trusting the cache; batches in between keep asking, and
+// once a writer has been seen once, applications that never touch SSBOs
+// (Minecraft and Sodium included) never set this again.
+void mg_multidraw_ssbo_touched() {
+    g_scratch.ssbo_dirty = true;
+}
 
 // GL_MAX_COMPUTE_WORK_GROUP_COUNT[0], asked of the driver once per context.
 //
@@ -2120,22 +2145,34 @@ struct md_ssbo_binding_scope_t {
     GLint64 size[N] = {};
 
     md_ssbo_binding_scope_t() {
-        GLES.glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &generic);
-        // Deliberately not a driver query. GL_CURRENT_PROGRAM is the one value
-        // here that the CPU side tracks exactly: glUseProgram is the only writer
-        // and program.cpp keeps GLState.shader.currentProgram in sync with the
-        // driver, so asking the driver cost a pipeline flush to learn something
-        // already known. The storage bindings themselves still have to be read
-        // from the driver, because glBindBufferBase/Range are not recorded by
-        // gl/buffer.cpp.
-        program = static_cast<GLint>(GLState.shader.currentProgram);
-        for (int i = 0; i < N; ++i) {
-            GLES.glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, i, &base[i]);
-            if (base[i] != 0 && GLES.glGetInteger64i_v) {
-                GLES.glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, i, &start[i]);
-                GLES.glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, i, &size[i]);
+        // The bindings live in the per-context cache and are only re-asked of
+        // the driver after a known writer touched them
+        // (mg_multidraw_ssbo_touched, called from gl/buffer.cpp). The program
+        // is deliberately not a driver query: glUseProgram is the only writer
+        // and program.cpp keeps GLState.shader.currentProgram in sync, so
+        // asking the driver cost a pipeline flush to learn something already
+        // known.
+        if (g_scratch.ssbo_dirty) {
+            GLES.glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &g_scratch.ssbo_generic);
+            for (int i = 0; i < 4; ++i) {
+                GLES.glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, i, &g_scratch.ssbo_base[i]);
+                if (g_scratch.ssbo_base[i] != 0 && GLES.glGetInteger64i_v) {
+                    GLES.glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, i, &g_scratch.ssbo_start[i]);
+                    GLES.glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, i, &g_scratch.ssbo_size[i]);
+                } else {
+                    g_scratch.ssbo_start[i] = 0;
+                    g_scratch.ssbo_size[i] = 0;
+                }
             }
+            g_scratch.ssbo_dirty = false;
         }
+        generic = g_scratch.ssbo_generic;
+        for (int i = 0; i < N; ++i) {
+            base[i] = g_scratch.ssbo_base[i];
+            start[i] = g_scratch.ssbo_start[i];
+            size[i] = g_scratch.ssbo_size[i];
+        }
+        program = static_cast<GLint>(GLState.shader.currentProgram);
     }
 
     // Rebinds the caller's program. The GLES call is skipped when the wrapper's
@@ -2215,10 +2252,40 @@ static void md_fall_from_compute(md_entry_t owner, GLenum mode, const GLsizei* c
 // entry points. `owner` decides which fallback chain a failure inside the
 // pipeline walks, so an Elements call never escapes into the BaseVertex order
 // the user may have configured separately.
+// The fusion pipeline costs a fixed block of driver calls per batch: three
+// scratch re-specifications, the binding dance in and out, the dispatch, the
+// barrier and the fused draw -- roughly 17 even with the binding cache, and
+// the barrier is not free on tile-based GPUs either. Batches with fewer
+// sub-draws than this run strictly cheaper as per-sub-draw draws, and tiny
+// batches are exactly what dense foliage produces: one small section's cutout
+// layer yields only a handful of sub-draws, and paying the pipeline's fixed
+// cost for it is a net loss. This is a routing decision, not a failure, so the
+// unroll backend is called directly and the fallback chain and its counters
+// stay out of it.
+constexpr GLsizei kComputeMinBatch = 12;
+
 static void md_compute_fused(md_entry_t owner, GLenum mode, const GLsizei* counts, GLenum type,
                              const void* const* indices, GLsizei primcount, const GLint* basevertex) {
     LOG()
     if (!mg_multidraw_enter(counts, type, primcount, indices)) return;
+
+    // Periodic accounting, so a device log shows what the fusion is actually
+    // doing without a debug build. Two thread-local increments per batch; the
+    // line itself prints at most once every five seconds.
+    static thread_local int t_fused = 0, t_small = 0, t_prims = 0;
+    static thread_local time_t t_window = 0;
+    {
+        const time_t now = time(nullptr);
+        if (t_window == 0) t_window = now;
+        if (now - t_window >= 5) {
+            LOG_V("[MobileGlues] multidraw compute: %d batches fused (%d sub-draws), %d small batches routed to the per-draw loop",
+                  t_fused, t_prims, t_small)
+            t_fused = 0;
+            t_small = 0;
+            t_prims = 0;
+            t_window = now;
+        }
+    }
 
     // Latched: without this a context that cannot compile the program used to
     // re-run glCreateShader/glCompileShader/glLinkProgram on every single call.
@@ -2226,6 +2293,22 @@ static void md_compute_fused(md_entry_t owner, GLenum mode, const GLsizei* count
         md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
+
+    // Small-batch cutoff, see kComputeMinBatch. The BaseVertex unroll backend
+    // carries the GL entry point's legacy mutable GLsizei*; it only reads the
+    // list, same as every fallback behind it.
+    if (primcount < kComputeMinBatch) {
+        ++t_small;
+        if (owner == md_entry_t::Elements) {
+            mg_glMultiDrawElements_drawelements(mode, counts, type, indices, primcount);
+        } else {
+            mg_glMultiDrawElementsBaseVertex_drawelements(mode, const_cast<GLsizei*>(counts), type, indices, primcount,
+                                                          basevertex);
+        }
+        return;
+    }
+    ++t_fused;
+    t_prims += primcount;
 
     const GLuint elementSize = static_cast<GLuint>(mg_index_size(type));
     if (elementSize == 0) {

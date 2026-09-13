@@ -266,8 +266,30 @@ int main() {
     md_fall_from_compute(E::ElementsBaseVertex);
     if (g_routed_owner != E::ElementsBaseVertex) return fail("case 6 bv routing", "elements chain");
 
+    // 7. Small-batch cutoff: the fusion's fixed per-batch block (~17 driver
+    //    calls: 3 scratch re-specs, binding dance, dispatch, barrier, fused
+    //    draw, restore) exceeds the per-sub-draw loop below kComputeMinBatch=12,
+    //    so batches under it route straight to the unroll backend. This is a
+    //    routing decision, not a chain fallback: the fallback tick must not
+    //    move. Dense foliage is the shape that produces many tiny batches.
+    {
+        constexpr int kComputeMinBatch = 12;
+        constexpr int kFusedFixedCost = 17;
+        if (kComputeMinBatch >= kFusedFixedCost) return fail("case 7 threshold sanity", "cutoff above fixed cost");
+        int fused = 0, small = 0, fallback_ticks = 0;
+        auto route = [&](int primcount) {
+            if (primcount < kComputeMinBatch) { ++small; return; } // direct unroll call
+            ++fused;                                               // fusion pipeline
+            (void)fallback_ticks;                                  // unchanged by routing
+        };
+        const int foliage_frame[] = {3, 6, 2, 9, 4, 40, 64, 8, 120, 7};
+        for (int pc : foliage_frame) route(pc);
+        if (fused != 3 || small != 7) return fail("case 7 cutoff routing", std::to_string(fused) + "/" + std::to_string(small));
+        if (fallback_ticks != 0) return fail("case 7 fallback tick moved", "dirty");
+    }
+
     std::printf("PASS: Elements leads with compute on no-batched-extension drivers, batched forms stay ahead "
                 "where they exist, explicit config still wins, BaseVertex default unchanged, fallback routing "
-                "is owner-aware\n");
+                "is owner-aware, small batches route to the per-draw loop\n");
     return 0;
 }

@@ -127,6 +127,13 @@ extern "C"
     // callers hold; the mapping to the real name happens on the multidraw side.
     void mg_multidraw_buffer_invalidated(GLuint virtual_name);
 
+    // gl/buffer.cpp calls this whenever an entry point may have changed a
+    // shader-storage binding (generic or indexed), including through the
+    // atomic-counter emulation and on buffer deletion. The next fused draw
+    // re-reads the SSBO bindings from the driver instead of reusing its
+    // per-context cache.
+    void mg_multidraw_ssbo_touched();
+
 #ifdef __cplusplus
 }
 #endif

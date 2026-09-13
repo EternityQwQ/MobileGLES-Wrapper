@@ -33,6 +33,7 @@
 // error. The extern "C" must match multidraw.h's block or the two become
 // different symbols.
 extern "C" void mg_multidraw_buffer_invalidated(GLuint virtual_name);
+extern "C" void mg_multidraw_ssbo_touched(void);
 
 // ============================================================================
 // Thread-local scratch buffer cache
@@ -553,6 +554,9 @@ void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
         // The name is about to be free for reuse with a different allocation, so
         // any cached size for it is now wrong.
         mg_multidraw_buffer_invalidated(buffers[i]);
+        // Deleting a bound buffer unbinds it driver-side, both generic and
+        // indexed; any cached SSBO binding naming it is now stale.
+        mg_multidraw_ssbo_touched();
         // Clean up any PBO shadow data for this buffer.
         pbo_shadow_delete(buffers[i]);
         remove_buffer(buffers[i]);
@@ -574,6 +578,9 @@ void glBindBuffer(GLenum target, GLuint buffer) {
     LOG()
     LOG_D("glBindBuffer, target = %s, buffer = %d", glEnumToString(target), buffer)
     set_bound_buffer_by_target(target, buffer);
+    // The multidraw fusion caches the SSBO bindings across batches; this is a
+    // writer, so the cache has to go stale before the next fused draw.
+    if (target == GL_SHADER_STORAGE_BUFFER) mg_multidraw_ssbo_touched();
     // save ibo binding to vao
     if (target == GL_ELEMENT_ARRAY_BUFFER) {
         update_vao_ibo_binding(find_bound_array(), buffer);
@@ -1046,6 +1053,11 @@ void bindAllAtomicCounterAsSSBO() {
         if (buf.id != 0) {
             GLuint realID = find_real_buffer(buf.id);
             GLES.glBindBufferRange(GL_SHADER_STORAGE_BUFFER, i, realID, buf.offset, buf.size);
+            // This file writes the SSBO bindings directly through GLES,
+            // bypassing glBindBufferBase/Range, so the fusion cache has to be
+            // told by hand.
+            track_ssbo_indexed(i, realID);
+            mg_multidraw_ssbo_touched();
             LOG_D("Bound atomic counter buffer %u(real: %u) as SSBO at index %zu", buf.id, realID, i);
         }
     }
@@ -1059,14 +1071,14 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offs
 
     if (buffer == 0) {
         GLES.glBindBufferRange(target, index, buffer, offset, size);
-        if (target == GL_SHADER_STORAGE_BUFFER) track_ssbo_indexed(index, 0);
+        if (target == GL_SHADER_STORAGE_BUFFER) { track_ssbo_indexed(index, 0); mg_multidraw_ssbo_touched(); }
         CHECK_GL_ERROR
         return;
     }
     auto [real_buffer, exists] = find_real_buffer_with_exists(buffer);
     if (!exists) {
         GLES.glBindBufferRange(target, index, buffer, offset, size);
-        if (target == GL_SHADER_STORAGE_BUFFER) track_ssbo_indexed(index, buffer);
+        if (target == GL_SHADER_STORAGE_BUFFER) { track_ssbo_indexed(index, buffer); mg_multidraw_ssbo_touched(); }
         CHECK_GL_ERROR
         return;
     }
@@ -1093,6 +1105,7 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offs
         }
     } else if (target == GL_SHADER_STORAGE_BUFFER) {
         track_ssbo_indexed(index, real_buffer);
+        mg_multidraw_ssbo_touched();
     }
     CHECK_GL_ERROR
 }
@@ -1104,14 +1117,14 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
 
     if (buffer == 0) {
         GLES.glBindBufferBase(target, index, buffer);
-        if (target == GL_SHADER_STORAGE_BUFFER) track_ssbo_indexed(index, 0);
+        if (target == GL_SHADER_STORAGE_BUFFER) { track_ssbo_indexed(index, 0); mg_multidraw_ssbo_touched(); }
         CHECK_GL_ERROR
         return;
     }
     auto [real_buffer, exists] = find_real_buffer_with_exists(buffer);
     if (!exists) {
         GLES.glBindBufferBase(target, index, buffer);
-        if (target == GL_SHADER_STORAGE_BUFFER) track_ssbo_indexed(index, buffer);
+        if (target == GL_SHADER_STORAGE_BUFFER) { track_ssbo_indexed(index, buffer); mg_multidraw_ssbo_touched(); }
         CHECK_GL_ERROR
         return;
     }
@@ -1123,6 +1136,7 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     GLES.glBindBufferBase(target, index, real_buffer);
     if (target == GL_SHADER_STORAGE_BUFFER) {
         track_ssbo_indexed(index, real_buffer);
+        mg_multidraw_ssbo_touched();
     }
     CHECK_GL_ERROR
 }
