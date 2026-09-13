@@ -203,18 +203,49 @@ namespace
     // Sentinel meaning "the binding was already correct, nothing to restore".
     constexpr GLuint kNoRestore = static_cast<GLuint>(-1);
 
-    // Per-target restore stacks. Thread-local because the GL context is
-    // current to one thread; a stack because DSA calls nest (glBindTextureUnit
-    // inside glTextureStorage2D, for example) and must unwind in order.
-    thread_local ankerl::unordered_dense::map<GLenum, std::vector<GLuint>> g_bindingStack;
+    // One restore frame per temporary bind.
+    //
+    // The previous design was a map<GLenum, vector<GLuint>> keyed by target,
+    // which cost a hash lookup on every push and pop plus a heap allocation the
+    // first time each target appeared. Two facts make a flat stack strictly
+    // better and much simpler:
+    //
+    //   * DSA nesting is strict LIFO. glBindTextureUnit inside glTextureStorage2D
+    //     pushes and pops in reverse order, so the outermost frame is always the
+    //     one being popped. There is no need to bucket by target at all -- and
+    //     bucketing was in fact the wrong model, because two nested binds of the
+    //     *same* target (glBlitNamedFramebuffer with the same FBO as src and dst)
+    //     pushed onto the same bucket and had to be distinguished by depth rather
+    //     than by target.
+    //   * The depth is small and bounded. The deepest call site nests 2 binds;
+    //     a fixed inline capacity of 8 covers that with room to spare, so the
+    //     steady state allocates nothing.
+    //
+    // Thread-local because a GL context is current to exactly one thread.
+    struct TempBindingFrame {
+        GLenum target;
+        GLuint saved;
+    };
+    constexpr size_t kTempBindingCapacity = 8;
+    thread_local TempBindingFrame g_bindingStack[kTempBindingCapacity];
+    thread_local size_t g_bindingDepth = 0;
 
     // Generic push/pop. `current` is the CPU-tracked binding for `target`.
     void PushTempBinding(GLenum target, GLuint object, GLuint current) {
-        if (current == object) {
-            g_bindingStack[target].push_back(kNoRestore);
+        // A frame past the inline capacity would be dropped and the caller's
+        // binding would never be restored, silently corrupting GL state for the
+        // rest of the process. That is worth a log line; it is also impossible
+        // with the call sites as they stand, so it stays a safety net.
+        if (g_bindingDepth >= kTempBindingCapacity) {
+            LOG_E("[DSA] temporary-binding stack overflow (depth %zu), binding will not be restored", g_bindingDepth);
             return;
         }
-        g_bindingStack[target].push_back(current);
+
+        const GLuint saved = (current == object) ? kNoRestore : current;
+        g_bindingStack[g_bindingDepth++] = {target, saved};
+
+        if (saved == kNoRestore) return;
+
         LOG_D("[DSA] [TempBind] target=0x%X, prev=%u -> bind=%u", target, current, object);
         CHECK_GL_ERROR;
         BindTargetNow(target, object);
@@ -222,24 +253,29 @@ namespace
     }
 
     void PopTempBinding(GLenum target) {
-        auto it = g_bindingStack.find(target);
-        if (it == g_bindingStack.end() || it->second.empty()) {
+        if (g_bindingDepth == 0) {
             LOG_D("[DSA] [Restore] no saved binding for target 0x%X", target);
             return;
         }
 
-        const GLuint toRestore = it->second.back();
-        it->second.pop_back();
-        if (it->second.empty()) g_bindingStack.erase(it);
+        const TempBindingFrame frame = g_bindingStack[--g_bindingDepth];
+        // The stack is LIFO, so this must hold. If it does not, a push never got
+        // its pop and the frames below are misaligned; complain rather than
+        // restore the wrong target.
+        if (frame.target != target) {
+            LOG_E("[DSA] unbalanced temporary bind: popping target 0x%X but the top frame is 0x%X", target,
+                  frame.target);
+            return;
+        }
 
-        if (toRestore == kNoRestore) {
+        if (frame.saved == kNoRestore) {
             LOG_D("[DSA] [Restore] target=0x%X, binding already correct", target);
             return;
         }
 
-        LOG_D("[DSA] [Restore] target=0x%X, bind back to %u", target, toRestore);
+        LOG_D("[DSA] [Restore] target=0x%X, bind back to %u", target, frame.saved);
         CHECK_GL_ERROR;
-        BindTargetNow(target, toRestore);
+        BindTargetNow(target, frame.saved);
         CHECK_GL_ERROR_NO_INIT;
     }
 
@@ -285,8 +321,14 @@ namespace
 
     // --- Texture target resolution -----------------------------------------
 
+    // Resolves which GLES texture target a texture object lives on.
+    //
+    // Uses the silent lookup, not mgGetTexObjectByID: this runs on every
+    // texture operation, and the logging variant takes write_log()'s mutex for
+    // a miss that is not an error (glCreateTextures hands out names that have
+    // no storage yet, so "not found" is a normal state here).
     GLenum GetTexTarget(GLuint texture) {
-        auto* obj = mgGetTexObjectByID(texture);
+        auto* obj = mgLookupTexObjectByID(texture);
         if (!obj) return GL_TEXTURE_2D;
         return ConvertTextureTargetToGLEnum(obj->target);
     }
