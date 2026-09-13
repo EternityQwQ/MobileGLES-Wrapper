@@ -874,6 +874,9 @@ static void md_call_elements(md_backend_t b, GLenum mode, const GLsizei* count, 
     case md_backend_t::MultiArrays:
         mg_glMultiDrawElements_multiarrays(mode, count, type, indices, primcount);
         break;
+    case md_backend_t::Compute:
+        mg_glMultiDrawElements_compute(mode, count, type, indices, primcount);
+        break;
     default:
         mg_glMultiDrawElements_drawelements(mode, count, type, indices, primcount);
         break;
@@ -961,6 +964,9 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type, const v
             break;
         case md_backend_t::MultiArrays:
             func_ptr = mg_glMultiDrawElements_multiarrays;
+            break;
+        case md_backend_t::Compute:
+            func_ptr = mg_glMultiDrawElements_compute;
             break;
         default:
             // Unroll, and anything the mask should already have rejected.
@@ -2187,28 +2193,46 @@ static bool md_respecify_ssbo(GLuint buf, size_t bytes, const void* data, const 
     return true;
 }
 
-GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsizei* counts, GLenum type,
-                                                               const void* const* indices, GLsizei primcount,
-                                                               const GLint* basevertex) {
+// A failure inside the fusion pipeline falls back through the chain of the
+// entry point that owns the call. The BaseVertex chain's legacy GL signature
+// takes a mutable GLsizei*; every backend behind it only reads the list
+// (validated in mg_multidraw_enter), so the const is dropped exactly here and
+// nowhere else.
+static void md_fall_from_compute(md_entry_t owner, GLenum mode, const GLsizei* counts, GLenum type,
+                                 const void* const* indices, GLsizei primcount, const GLint* basevertex) {
+    if (owner == md_entry_t::Elements) {
+        md_fall_elements(md_backend_t::Compute, mode, counts, type, indices, primcount);
+        return;
+    }
+    md_fall_elements_bv(md_backend_t::Compute, mode, const_cast<GLsizei*>(counts), type, indices, primcount,
+                        basevertex);
+}
+
+// The fusion pipeline proper, shared by the Elements and ElementsBaseVertex
+// entry points. `owner` decides which fallback chain a failure inside the
+// pipeline walks, so an Elements call never escapes into the BaseVertex order
+// the user may have configured separately.
+static void md_compute_fused(md_entry_t owner, GLenum mode, const GLsizei* counts, GLenum type,
+                             const void* const* indices, GLsizei primcount, const GLint* basevertex) {
     LOG()
     if (!mg_multidraw_enter(counts, type, primcount, indices)) return;
 
     // Latched: without this a context that cannot compile the program used to
     // re-run glCreateShader/glCompileShader/glLinkProgram on every single call.
     if (g_scratch.compute_failed) {
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
 
     const GLuint elementSize = static_cast<GLuint>(mg_index_size(type));
     if (elementSize == 0) {
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
 
     if (is_strip_like_mode(mode)) {
         LOG_D("multidraw compute: strip/loop mode, fallback")
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
 
@@ -2222,13 +2246,13 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         // Unknown or non-separable mode (GL_PATCHES, anything new): fusing is not
         // provably safe, so do not.
         MD_WARN_ONCE("multidraw compute: mode 0x%04x cannot be fused safely, falling back", mode);
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
     for (GLsizei i = 0; i < primcount; ++i) {
         if (counts[i] % verts_per_prim != 0) {
             MD_WARN_ONCE("multidraw compute: sub-draw count is not a whole number of primitives, falling back");
-            md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+            md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
             return;
         }
     }
@@ -2238,7 +2262,7 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     // baseVertex, silently disabling restart. The CPU path handles sentinels.
     if (mg_primitive_restart_enabled()) {
         LOG_D("multidraw compute: primitive restart enabled, fallback")
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
 
@@ -2269,7 +2293,7 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
             g_scratch.draw_cmd_buffer = 0;
             g_scratch.output_ibo = 0;
             g_scratch.compute_failed = true;
-            md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+            md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
             return;
         }
 
@@ -2285,7 +2309,7 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     const GLuint ibo = mg_driver_bound_buffer(GL_ELEMENT_ARRAY_BUFFER);
     if (ibo == 0) {
         LOG_D("multidraw compute: no element array buffer bound, fallback")
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
     int ibo_size = 0;
@@ -2293,17 +2317,17 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         // Not an error worth a latch: the application may bind an index buffer
         // and try again, and that is exactly what this branch means.
         LOG_D("multidraw compute: no mappable index buffer size, fallback")
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
     if (ibo_size <= 0) {
         MD_WARN_ONCE("multidraw compute: invalid index buffer size, falling back");
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
     if (elementSize < 4 && (ibo_size % 4) != 0) {
         MD_WARN_ONCE("multidraw compute: index buffer size is not 4-byte aligned, falling back");
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
 
@@ -2387,7 +2411,7 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     }
 
     if (!ok) {
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
 
@@ -2421,7 +2445,7 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         !md_respecify_ssbo(g_scratch.prefix_sum_buffer, sizeof(GLuint) * prefix_data.size(), prefix_data.data(),
                            "prefix sum buffer", &g_scratch.prefix_sum_cap)) {
         ssbo_restore.restore();
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
 
@@ -2444,7 +2468,7 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
             MD_WARN_ONCE("multidraw compute: output buffer allocation failed (wanted %zu bytes, got %d), falling back",
                          output_bytes, output_size);
             ssbo_restore.restore();
-            md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+            md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
             return;
         }
         g_scratch.output_cap = static_cast<size_t>(output_size);
@@ -2469,7 +2493,7 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     if (groups > static_cast<uint64_t>(mg_max_compute_groups_x())) {
         MD_WARN_ONCE("multidraw compute: work group count exceeds the limit, falling back");
         ssbo_restore.restore();
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
 
@@ -2486,7 +2510,7 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
         // The output buffer was just reallocated, so its contents are undefined:
         // drawing from it would render garbage rather than nothing.
         ssbo_restore.restore();
-        md_fall_elements_bv(md_backend_t::Compute, mode, counts, type, indices, primcount, basevertex);
+        md_fall_from_compute(owner, mode, counts, type, indices, primcount, basevertex);
         return;
     }
 
@@ -2504,24 +2528,21 @@ GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsi
     GLES.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
 }
 
-// glMultiDrawElements has no base vertex component, and the compute pipeline's
-// entire job is applying one. There is nothing for it to do on this entry point,
-// so it degrades to the spec-defined loop.
+GLAPI GLAPIENTRY void mg_glMultiDrawElementsBaseVertex_compute(GLenum mode, GLsizei* counts, GLenum type,
+                                                               const void* const* indices, GLsizei primcount,
+                                                               const GLint* basevertex) {
+    md_compute_fused(md_entry_t::ElementsBaseVertex, mode, counts, type, indices, primcount, basevertex);
+}
+
+// glMultiDrawElements rides the same fusion pipeline: the batch's index ranges
+// are concatenated into one glDrawElements on the GPU, with a base vertex of 0
+// because this entry point passes none. That is a distinct CPU implementation
+// from Unroll -- one fused draw per batch instead of one driver call per
+// sub-draw -- which is the point on the many drivers that ship no batched
+// multi-draw extension at all.
 void mg_glMultiDrawElements_compute(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices,
                                     GLsizei primcount) {
-    LOG()
-    if (!mg_multidraw_enter(count, type, primcount, indices)) return;
-
-    prepareForDraw();
-
-    for (GLsizei i = 0; i < primcount; ++i) {
-        const GLsizei c = count[i];
-        if (c > 0) {
-            GLES.glDrawElements(mode, c, type, indices[i]);
-        }
-    }
-
-    CHECK_GL_ERROR
+    md_compute_fused(md_entry_t::Elements, mode, count, type, indices, primcount, nullptr);
 }
 
 // ---------------------------------------------------------------------------

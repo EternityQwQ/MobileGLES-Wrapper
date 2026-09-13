@@ -472,27 +472,43 @@ struct md_entry_desc_t {
     unsigned allowed;             // backends that are a DISTINCT implementation here
     B native_backend;             // what the pseudo item "native" means here
     const char* why;              // explains a rejection, so the log says why not just "invalid"
+    const char* const* default_order; // per-entry padding order; null pads with the global default
+    int default_order_len;
 };
+
+// Elements: the batched one-call forms keep their lead when a driver actually
+// has them; on the far more common driver with no batched multi-draw at all,
+// the compute fusion leads (one fused draw per batch plus a GPU prepass) ahead
+// of the per-sub-draw loops, with Unroll as the always-available safety net and
+// Indirect last -- the same per-sub-draw call count as Unroll, costlier per call.
+const char* const k_md_default_order_elements[] = {
+    "native", "multiindirect", "multibasevertex", "compute", "unroll", "indirect",
+};
+constexpr int MD_DEFAULT_ORDER_ELEMENTS_LEN = 6;
 
 const md_entry_desc_t k_md_entries[MD_ENTRY_COUNT] = {
     {"multidrawOrderArrays", "multidrawModeArrays", "glMultiDrawArrays",
      md_bit(B::Unroll) | md_bit(B::MultiArrays) | md_bit(B::MultiIndirect),
      B::MultiArrays, // glMultiDrawArraysEXT
-     "glMultiDrawArrays draws no indices, so index-side backends do not apply"},
+     "glMultiDrawArrays draws no indices, so index-side backends do not apply", nullptr, 0},
 
-    // BaseVertex/Compute are excluded: with no base vertex to apply or rebase,
-    // they would be the same unrolled loop as Unroll.
+    // BaseVertex stays excluded: with no base vertex to apply, the basevertex
+    // backend is the same per-sub-draw loop as Unroll. Compute IS distinct --
+    // it fuses the whole batch into ONE driver draw call through GPU-side index
+    // concatenation (base vertex 0 when the caller passes none), which is the
+    // point on the many mobile drivers that ship no batched multi-draw at all.
     {"multidrawOrderElements", "multidrawModeElements", "glMultiDrawElements",
      md_bit(B::Unroll) | md_bit(B::Indirect) | md_bit(B::MultiIndirect) | md_bit(B::MultiBaseVertex) |
-         md_bit(B::MultiArrays),
+         md_bit(B::MultiArrays) | md_bit(B::Compute),
      B::MultiArrays, // glMultiDrawElementsEXT
-     "glMultiDrawElements has no base vertex, so basevertex/compute are the same loop as unroll"},
+     "glMultiDrawElements has no base vertex, so the basevertex backend is the same loop as unroll",
+     k_md_default_order_elements, MD_DEFAULT_ORDER_ELEMENTS_LEN},
 
     {"multidrawOrderElementsBaseVertex", "multidrawModeElementsBaseVertex", "glMultiDrawElementsBaseVertex",
      md_bit(B::Unroll) | md_bit(B::BaseVertex) | md_bit(B::Indirect) | md_bit(B::MultiIndirect) |
          md_bit(B::MultiBaseVertex) | md_bit(B::Compute),
      B::MultiBaseVertex, // glMultiDrawElementsBaseVertexEXT
-     "multiarrays (EXT_multi_draw_arrays) carries no base vertex"},
+     "multiarrays (EXT_multi_draw_arrays) carries no base vertex", nullptr, 0},
 
     // These two receive a command buffer from the application; the only choice is
     // whether to hand the whole batch to the driver or walk it one command at a
@@ -500,12 +516,12 @@ const md_entry_desc_t k_md_entries[MD_ENTRY_COUNT] = {
     {"multidrawOrderArraysIndirect", "multidrawModeArraysIndirect", "glMultiDrawArraysIndirect",
      md_bit(B::Indirect) | md_bit(B::MultiIndirect),
      B::MultiIndirect, // glMultiDrawArraysIndirectEXT
-     "the application supplies the commands, so only indirect/multiindirect exist here"},
+     "the application supplies the commands, so only indirect/multiindirect exist here", nullptr, 0},
 
     {"multidrawOrderElementsIndirect", "multidrawModeElementsIndirect", "glMultiDrawElementsIndirect",
      md_bit(B::Indirect) | md_bit(B::MultiIndirect),
      B::MultiIndirect, // glMultiDrawElementsIndirectEXT
-     "the application supplies the commands, so only indirect/multiindirect exist here"},
+     "the application supplies the commands, so only indirect/multiindirect exist here", nullptr, 0},
 };
 
 struct md_caps_t {
@@ -674,8 +690,13 @@ static void md_expand_order(E e, const md_order_item_t* items, int item_count) {
     }
     // Pad with the default order so a hand-edited partial list still ranks every
     // backend. "native" sits first in the default, so the entry's native form
-    // leads the padding as well.
-    for (const char* name : k_md_default_global_order) {
+    // leads the padding as well. An entry with its own default order (Elements)
+    // pads with that instead, so the backend that should lead on the common
+    // no-batched-extension driver actually leads when nothing is configured.
+    const char* const* pad = d.default_order ? d.default_order : k_md_default_global_order;
+    const int pad_len = d.default_order ? d.default_order_len : MD_GLOBAL_ITEMS;
+    for (int p = 0; p < pad_len; ++p) {
+        const char* name = pad[p];
         if (std::string(name) == "native") {
             push(d.native_backend);
         } else {
@@ -776,12 +797,13 @@ void init_settings_post() {
     // was actually opened; trusting the string alone meant a null jump on the
     // first frame that issued a multi-draw.
     //
-    // The GLES 3.2 core forms count without the string: the batched indirect
-    // entry points were promoted from EXT_multi_draw_indirect into 3.2 core, so
-    // a driver that reports 3.2 exports them whether or not it lists the
-    // extension. Adreno is exactly that case; requiring string+EXT-pointer left
-    // it with no batched backend at all and degraded every multi-draw to
-    // per-sub-draw loops — a large per-frame CPU cost for nothing.
+    // Batched multi-draw indirect is desktop GL 4.3+ core; no GLES version ever
+    // promoted it, so on GLES only the GL_EXT_multi_draw_indirect string plus
+    // EXT symbols vouch for the batched entry points, and a null dlsym of the
+    // core names is the correct answer on a mobile driver. The 3.2-core
+    // condition below stays for hosts that forward to desktop GL. A driver
+    // exposing neither form has no batched backend -- the per-entry default
+    // orders route those devices onto the emulation backends instead.
     const bool multidraw = (has_es32 && GLES.glMultiDrawElementsIndirect != nullptr) ||
                            (g_gles_caps.GL_EXT_multi_draw_indirect && GLES.glMultiDrawElementsIndirectEXT != nullptr);
     const bool basevertex = (has_bv_ext || has_es32) && GLES.glDrawElementsBaseVertex != nullptr;
