@@ -1849,6 +1849,9 @@ void mg_glMultiDrawArrays_multiindirect(GLenum mode, const GLint* first, const G
                 return;
             }
             g_scratch.arrays_multiindirect_state = md_probe_state_t::Working;
+            // Unconditional: pairs with the MD_WARN_ONCE on the failure path,
+            // so the log says "batched indirect is live" and not just silence.
+            LOG_V("multidraw arrays: multiindirect probe ok, batched indirect in use")
         }
     }
 
