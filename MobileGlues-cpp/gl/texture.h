@@ -213,6 +213,16 @@ public:
 
 TextureObject* mgGetTexObjectByTarget(GLenum target);
 TextureObject* mgGetTexObjectByID(unsigned texture);
+
+// Same lookup, without the LOG_E on a miss.
+//
+// The logging matters: LOG_E is the one diagnostic macro gl/log.h does *not*
+// gate behind GLOBAL_DEBUG, so it always runs -- and write_log() takes a mutex
+// and does a vfprintf. Callers that ask on a hot path (every DSA texture
+// operation resolves its target through here) must not pay that, and must not
+// spam the log for a texture name that legitimately does not exist yet.
+TextureObject* mgLookupTexObjectByID(unsigned texture);
+
 int GetCurrentTextureUnitIndex();
 void InitTextureMap(size_t expectedSize);
 

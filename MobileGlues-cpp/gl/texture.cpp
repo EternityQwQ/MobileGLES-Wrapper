@@ -306,6 +306,21 @@ TextureObject* mgGetTexObjectByID(unsigned texture) {
     return BufferObjectsVec[texture];
 }
 
+// The hot-path variant: no LOG_E.
+//
+// mgGetTexObjectByID's diagnostics are worth keeping for the setup-code callers
+// (framebuffer attachment queries, glBindTextures), which is why that function
+// is left alone. But the DSA layer resolves a texture's target on *every*
+// operation, and there a miss is an ordinary occurrence rather than an error:
+// a name may be queried before the driver-side object is materialised, and
+// glCreateTextures deliberately returns names that have no storage yet. Logging
+// each of those would take write_log()'s mutex and do a vfprintf on the draw
+// path, and fill the log with lines that are not actionable.
+TextureObject* mgLookupTexObjectByID(unsigned texture) {
+    if (texture >= BufferObjectsVec.size()) return nullptr;
+    return BufferObjectsVec[texture];
+}
+
 // ============================================================================
 // Internal format conversion helper
 // ============================================================================

@@ -23,6 +23,18 @@
 #define DEBUG 0
 
 // ============================================================================
+
+// multidraw (gl/multidraw.cpp) caches GL_BUFFER_SIZE per buffer, because its
+// backends only ask whether an allocation covers the bytes a draw indexes and
+// that answer changes solely when the allocation does. Declared here by hand
+// rather than by including multidraw.h: that header also declares the
+// glMultiDraw* family, some of which this translation unit sees with a
+// different signature, and pulling it in produces a conflicting-declaration
+// error. The extern "C" must match multidraw.h's block or the two become
+// different symbols.
+extern "C" void mg_multidraw_buffer_invalidated(GLuint virtual_name);
+
+// ============================================================================
 // Thread-local scratch buffer cache
 // ============================================================================
 // Hot-path texture uploads (glTexSubImage2D with BGRA swizzle) need a tight
@@ -538,6 +550,9 @@ void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
             GLES.glDeleteBuffers(1, &real_buff);
             CHECK_GL_ERROR
         }
+        // The name is about to be free for reuse with a different allocation, so
+        // any cached size for it is now wrong.
+        mg_multidraw_buffer_invalidated(buffers[i]);
         // Clean up any PBO shadow data for this buffer.
         pbo_shadow_delete(buffers[i]);
         remove_buffer(buffers[i]);
@@ -598,6 +613,13 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     int idx = binding_target_to_index(target);
     if (idx >= 0) {
         set_buffer_data_size(g_bound_buffers_arr[idx], size);
+        // This is the one call that changes a buffer's allocation size, so it is
+        // the one that can change the answer to multidraw's "does this cover the
+        // bytes we are about to index" check. Dropping only *this* buffer's
+        // entry rather than the whole cache keeps every other buffer's cached
+        // size, which is what makes the cache worth having on a frame that
+        // re-uploads one buffer per draw.
+        mg_multidraw_buffer_invalidated(g_bound_buffers_arr[idx]);
         // Sync PBO shadow for GL_PIXEL_UNPACK_BUFFER. Use idx (already known)
         // instead of re-checking target.
         if (idx == BI_PIXEL_UNPACK) {
@@ -1242,11 +1264,19 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
         // Without this, Xaero-style glBufferStorage PBO uploads would miss
         // the shadow and fall back to glCopyBufferSubData, which may fail on
         // some GLES drivers, leaving the texture un-swizzled (blue).
-        if (target == GL_PIXEL_UNPACK_BUFFER) {
-            int idx = binding_target_to_index(target);
+        //
+        // The multidraw size cache is dropped for any target, not just the PBO
+        // one: this is an allocation, so it changes the answer to "does this
+        // buffer cover the bytes a draw indexes" for the bound buffer whatever
+        // it is bound to.
+        {
+            const int idx = binding_target_to_index(target);
             if (idx >= 0) {
-                set_buffer_data_size(g_bound_buffers_arr[idx], size);
-                pbo_shadow_alloc(g_bound_buffers_arr[idx], size, data);
+                mg_multidraw_buffer_invalidated(g_bound_buffers_arr[idx]);
+                if (target == GL_PIXEL_UNPACK_BUFFER) {
+                    set_buffer_data_size(g_bound_buffers_arr[idx], size);
+                    pbo_shadow_alloc(g_bound_buffers_arr[idx], size, data);
+                }
             }
         }
     } else {

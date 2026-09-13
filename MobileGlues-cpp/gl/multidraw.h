@@ -112,6 +112,21 @@ extern "C"
     GLAPI GLAPIENTRY void glMultiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect,
                                                            GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
 
+    // Cache invalidation hook, called by gl/buffer.cpp from the GL entry points
+    // that can change a buffer's allocation or its virtual->real mapping --
+    // glBufferData, glBufferStorage and glDeleteBuffers.
+    //
+    // The multidraw backends cache GL_BUFFER_SIZE per buffer, because they ask
+    // only whether an allocation covers the bytes a draw touches and that answer
+    // changes solely when the allocation does. Without this hook a later
+    // glBufferData that *shrinks* a buffer would leave the cache claiming more
+    // room than the store has, and a sub-draw would be allowed to index past the
+    // end of it.
+    //
+    // Takes the virtual (application-visible) name, which is what the GL
+    // callers hold; the mapping to the real name happens on the multidraw side.
+    void mg_multidraw_buffer_invalidated(GLuint virtual_name);
+
 #ifdef __cplusplus
 }
 #endif
