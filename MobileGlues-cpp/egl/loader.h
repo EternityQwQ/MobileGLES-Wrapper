@@ -236,6 +236,23 @@ extern "C"
 // a ranking only needed while diagnosing), and with it the only use of the name.
 void mg_egl_note_guarded_call();
 
+// The guard-off counterpart. Runs the SDL swap-gate tick on every call made
+// while the eager guard is disabled — the default.
+//
+// It must exist separately because the SDL repair is not guard work. SDL's TLS
+// record of the current window is lost by the launcher's window-reuse hook no
+// matter which mode is active; when this tick lived only in the guarded path,
+// turning the guard off silenced it, and the result was every frame rendered
+// and none shown — the game runs, audio plays, touch works, eglSwapBuffers is
+// simply never reached because SDL refuses the swap before it happens. That is
+// the real-device regression that produced a black screen with working sound.
+//
+// Steady-state cost with the guard off: one thread-local increment plus one
+// modulo. The expensive body sits behind that gate, behind a per-attempt
+// budget, behind a check that the calling thread is the one holding the
+// application's binding.
+void mg_egl_note_unguarded_call();
+
 // Whether the guard runs at all.
 //
 // The port source has no guard of this kind anywhere: its render thread is
@@ -251,27 +268,126 @@ void mg_egl_note_guarded_call();
 // structural difference left between this library and the port source that runs
 // at the frame rate this one does not.
 //
-// Off means: no context is installed, and a call arriving on a thread without
-// one is passed through exactly as the port source would pass it.
+// Off means: the per-call check is not made. A context is still installed on a
+// thread that does not have one — see ScopedHostContext below, which asks at
+// most once per thread per render target rather than once per call. Turning it
+// off changes *when* the question is asked, not whether a worker ever gets a
+// context.
 bool mg_egl_host_context_guard_enabled();
+
+// EnsureHostContextOnce() — the shared answer to "does this thread have a
+// context?", remembered per thread and per render target.
+//
+// Declared here rather than exposed as a second mechanism because
+// ScopedHostContext and RepairHostContextOnce() below are the same question
+// asked from two directions: the first from an entry point about to run
+// (prevention), the second from one that has already seen a bad result
+// (repair). Both must settle on the same answer, or a thread can be repaired
+// by one and considered broken by the other.
+//
+// Returns true when the calling thread has a context as a result of this call
+// having established it — i.e. the caller was missing one and now is not.
+// Returns false when the thread already had one, or when none could be
+// obtained. Cost after the first call on a generation: one thread-local read.
+bool EnsureHostContextOnce();
+
+// Whether the question has already been answered on this thread for `generation`.
+// Exposed so a caller can distinguish "this thread is fine, nothing to do" from
+// "we tried and could not install one" without asking the driver again.
+bool EnsureHostContextSettled(unsigned generation);
 
 class ScopedHostContext {
 public:
-    ScopedHostContext() : bound_(mg_egl_host_context_guard_enabled() ? BindFallbackEGLContextIfNeeded() : false) {
-        mg_egl_note_guarded_call();
+    ScopedHostContext() : bound_(false) {
+        if (mg_egl_host_context_guard_enabled()) {
+            // Guard on: ask the driver on every call, as before. This is the
+            // expensive mode and the reason the default changed.
+            bound_ = BindFallbackEGLContextIfNeeded();
+            mg_egl_note_guarded_call();
+            return;
+        }
+
+        // Guard off — the default. This used to do NOTHING, which is what broke
+        // rendering: with the guard on, every entry point re-checked and a
+        // worker thread that had no context got one installed by whichever call
+        // happened first, so the whole shader pipeline (create → source →
+        // compile → link) ran on a worker that had a context by the time it
+        // needed one. Turning the guard off removed that accident without
+        // replacing it, so glCreateShader was repaired (it was the 26.3-pre-3
+        // crash) while glShaderSource and glCompileShader were not: the source
+        // upload and the compile were silently discarded, every program failed
+        // to link, and the world did not draw — while the UI, which needs none
+        // of those pipelines, kept working.
+        //
+        // The fix is not to go back to asking on every call. A thread needs a
+        // context once; after that the answer cannot change except when the
+        // application replaces its render target (the generation counter). So
+        // this asks at most once per thread per generation and is free
+        // afterwards, which is the same memory RepairHostContextOnce() uses —
+        // deliberately the same, so the two cannot disagree about whether a
+        // thread is usable.
+        bound_ = EnsureHostContextOnce();
+
+        // The watchdog's call-rate counter is deliberately NOT fed here: it
+        // describes the per-call check this mode does not make, and counting
+        // calls would report a cost the mode does not pay.
+        //
+        // But the SDL swap-gate tick is NOT guard work — see the comment on
+        // mg_egl_note_unguarded_call(). Leaving it inside the guarded branch
+        // only was the placement bug that black-screened the game on a real
+        // device the moment the guard's default became off: rendering kept
+        // running, audio and touch stayed alive, and the swap was refused by
+        // SDL on every frame. It runs on both paths from here on.
+        mg_egl_note_unguarded_call();
     }
     ~ScopedHostContext() {
         if (bound_) UnbindFallbackEGLContext();
     }
     ScopedHostContext(const ScopedHostContext&) = delete;
     ScopedHostContext& operator=(const ScopedHostContext&) = delete;
-    // True when this instance is the one that bound the context, i.e. the
-    // thread had none and any result read before this point is suspect.
+    // True when THIS instance is the one that installed the context, i.e. the
+    // thread had none before it and any result read earlier is suspect. False
+    // when the thread already had one — including on every call after the first
+    // on a generation, which is why this is not "does the thread have a
+    // context".
     bool Bound() const { return bound_; }
 
 private:
     bool bound_;
 };
+
+// ---------------------------------------------------------------------------
+// Lazy repair — the other half of the guard
+//
+// The eager guard above asks the driver a question on every call, whether or
+// not anything is wrong. That is the wrong shape for the majority of callers:
+// a thread that already has a context is asking a question whose answer is
+// already known, tens of thousands of times a frame.
+//
+// RepairHostContextOnce() inverts it. It is called by an entry point that has
+// already observed a result it cannot trust — a glCreateShader that returned 0,
+// an object name that came back empty — and binds a context only when there is
+// something to fix. A call site that never sees a bad result never pays
+// anything.
+//
+// The memory is per thread and generation-scoped: once the question "does this
+// thread have a context?" has been answered — either way, bound or impossible —
+// every later call on that generation is a thread-local read that returns
+// without touching EGL. So the whole mechanism costs at most ONE eglGetCurrentContext()
+// per thread per generation, against one per GL call for the eager guard.
+//
+// It is invalidated when the application's render target changes, because that
+// is when a context that was current can stop being current — the same
+// generation counter the eager guard follows. Without that, a thread that
+// repaired successfully once would keep believing it still has a context after
+// the surface underneath it was replaced.
+//
+// Returns true when the caller should retry the operation it just saw fail,
+// which is the case whenever a context is now available. It returns false only
+// when the thread has no context and none could be obtained, where a retry
+// would fail identically.
+// ---------------------------------------------------------------------------
+bool RepairHostContextOnce();
 
 // ---------------------------------------------------------------------------
 // The application's real render target

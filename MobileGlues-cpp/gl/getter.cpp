@@ -196,15 +196,20 @@ GLint QueryHostInt(GLenum pname) {
     }
 
     // Maybe the thread simply had no context: re-read with ours bound.
-    {
-        ScopedHostContext scoped;
-        if (scoped.Bound() && GLES.glGetIntegerv) {
-            GLint retry = 0;
-            GLES.glGetIntegerv(pname, &retry);
-            if (retry > 0) {
-                ReportContextFix(pname, retry);
-                return retry;
-            }
+    //
+    // RepairHostContextOnce() rather than "ScopedHostContext scoped; if
+    // (scoped.Bound())": ScopedHostContext only binds when the eager guard is
+    // enabled, so with the guard off — the default — Bound() was always false
+    // and this retry silently never ran. That made the guard the only thing
+    // keeping 26.3's zero-limit crash away, which is precisely the coupling this
+    // branch exists to break. The repair path now works with the guard off, at
+    // the cost of nothing until a limit actually comes back unusable.
+    if (RepairHostContextOnce() && GLES.glGetIntegerv) {
+        GLint retry = 0;
+        GLES.glGetIntegerv(pname, &retry);
+        if (retry > 0) {
+            ReportContextFix(pname, retry);
+            return retry;
         }
     }
 
@@ -270,16 +275,16 @@ void mg_guard_host_limit_i64(GLenum pname, GLint64* params) {
     using namespace limitguard;
     if (!params || *params > 0) return;
 
-    {
-        ScopedHostContext scoped;
-        if (scoped.Bound() && GLES.glGetInteger64v) {
-            GLint64 retry = 0;
-            GLES.glGetInteger64v(pname, &retry);
-            if (retry > 0) {
-                *params = retry;
-                ReportContextFix(pname, (long long)retry);
-                return;
-            }
+    // Same repair as the GLint path above, and the same reason it must not go
+    // through ScopedHostContext: with the guard off, Bound() is never true and
+    // this retry would be dead code.
+    if (RepairHostContextOnce() && GLES.glGetInteger64v) {
+        GLint64 retry = 0;
+        GLES.glGetInteger64v(pname, &retry);
+        if (retry > 0) {
+            *params = retry;
+            ReportContextFix(pname, (long long)retry);
+            return;
         }
     }
 
@@ -556,8 +561,12 @@ const GLubyte* QueryHostString(GLenum name) {
     const GLubyte* str = GLES.glGetString(name);
     if (str && *str) return str;
 
-    ScopedHostContext scoped;
-    if (scoped.Bound()) {
+    // RepairHostContextOnce() rather than ScopedHostContext::Bound(), for the
+    // reason spelled out in QueryHostInt: Bound() is false whenever the eager
+    // guard is off, which is the default, so this retry used to be dead code —
+    // and this is exactly the query 26.3-pre-3 called at startup, where
+    // glGetString(GL_RENDERER) returning NULL is the first symptom.
+    if (RepairHostContextOnce()) {
         const GLubyte* retry = GLES.glGetString(name);
         if (retry && *retry) {
             LOG_W_FORCE("Host glGetString(0x%x) only answered after binding the fallback context: "

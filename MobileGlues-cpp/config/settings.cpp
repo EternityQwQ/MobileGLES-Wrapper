@@ -78,10 +78,17 @@ void init_settings() {
     int bufferCoherentAsFlushCfg = success ? config_get_int("bufferCoherentAsFlush") : -1;
 
 
-    // All four default to ON. A missing key (-1) keeps them enabled; only an
-    // explicit 0 turns one off. They are independent: any combination is
-    // meaningful, and switching one off is meant to be tested against the
-    // others staying on so the difference can be attributed to that one alone.
+    // Read as raw ints (-1 means "key absent", see config_get_int), then each
+    // one is compared against the default its own comment documents below.
+    // They are independent: any combination is meaningful, and switching one
+    // off is meant to be tested against the others staying on so the
+    // difference can be attributed to that one alone.
+    //
+    // The comparison operator is NOT uniform, and that is load-bearing:
+    // config_get_int returns -1 for a missing key, so `!= 0` reads an absent
+    // key as ON while `> 0` reads it as OFF. The two entries below that gate
+    // expensive per-call work (hostContextGuard, cpuSwizzle) therefore use
+    // `> 0`, so that "the user never wrote the key" means "pay nothing".
     int selfPromotionCfg = success ? config_get_int("selfPromotion") : -1;
     int activateOnCreateCfg = success ? config_get_int("activateOnCreate") : -1;
     int hostContextGuardCfg = success ? config_get_int("hostContextGuard") : -1;
@@ -240,23 +247,35 @@ void init_settings() {
     // surface, so that a surface is never left undrawable when SDL reuses its
     // primary window. Every other difference has been ruled out as the cause of
     // the frame-rate gap — the per-call wrapper cost measures 0.0008 ms per
-    // frame against an 8.2 ms gap, the context guard is already off by default,
-    // and the upload paths are identical to the port source's — so this is what
-    // remains to be tested.
+    // frame against an 8.2 ms gap, and the upload paths are identical to the
+    // port source's — so this is what remains to be tested.
     //
-    // Same comparison caveat as hostContextGuard: config_get_int returns -1 for
-    // an absent key, so `!= 0` would read that as on.
+    // Same comparison caveat as the two entries below: config_get_int returns
+    // -1 for an absent key, so `!= 0` would read that as on.
     global_settings.activate_on_create = (activateOnCreateCfg > 0);
-    // On by default again.
+    // OFF by default.
     //
-    // Turning it off was an A/B experiment against the frame-rate gap, and it
-    // did not move the frame rate — the gap turned out to be
-    // buffer_coherent_as_flush (see above). Keeping it off costs correctness
-    // instead: with the guard off, a GL call from a thread that has no current
-    // EGL context goes straight to the host and is silently discarded.
+    // It was ON, and the cost of that decision lands on the path this project
+    // is measured on. The guard installs a context on threads the application
+    // never bound — shader compilation, chunk building — which is real value,
+    // but it pays for it by putting one eglGetCurrentContext() in front of
+    // every one of the ~127 wrapped entry points. The comment below calls that
+    // "one atomic load plus one eglGetCurrentContext() ... almost nothing",
+    // which was an assumption and never a measurement: on this driver the
+    // call is a real round trip into EGL (and through ANGLE/vendor wrappers
+    // beneath it), not the thread-local read it was assumed to be. egl/loader.h
+    // says as much at the definition of the guard.
     //
-    // That is what 26.3-pre-3 hit. Its startup queries the device before the
-    // application has bound a context, and every answer came back empty:
+    // A frame worth of Minecraft issues tens of thousands of these calls, so
+    // the assumption is exactly what "high or pegged CPU while rendering,
+    // drops when idle" describes: the cost is per call, so it tracks the draw
+    // and upload rate and disappears when the renderer stops.
+    //
+    // What turning it off used to cost is the reason for everything else in this
+    // commit. A GL call from a thread with no current EGL context goes straight
+    // to the host and is silently discarded, and 26.3-pre-3 queries the device
+    // at startup before the application has bound a context. Every answer came
+    // back empty:
     //   glGetString(GL_RENDERER) -> NULL
     //   glGetIntegerv(GL_MAX_TEXTURE_SIZE / GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT /
     //                 GL_MAX_TEXTURE_MAX_ANISOTROPY) -> 0
@@ -265,11 +284,54 @@ void init_settings() {
     // the pipeline compiled "shader 0", got no info log, and Minecraft threw
     // "Failed to find or load pipeline minecraft:pipeline/gui".
     //
-    // The guard's fast path is one atomic load plus one eglGetCurrentContext()
-    // per GL call, so a thread that already has a context pays almost nothing.
-    // Set "hostContextGuard": 0 in MG/settings.json to disable it.
-    global_settings.host_context_guard = (hostContextGuardCfg != 0);
-    global_settings.cpu_swizzle = (cpuSwizzleCfg != 0);
+    // Those four sites are now each repaired where the failure is observed,
+    // rather than prevented globally:
+    //   glCreateShader / glCreateProgram  → RepairHostContextOnce() on a 0 result
+    //                                       (egl/loader.cpp)
+    //   glGetString / glGetIntegerv /
+    //   glGetInteger64v                   → same call on an empty result
+    //                                       (gl/getter.cpp), plus the
+    //                                       kLimitFallbacks table as a last resort
+    //   glMapBufferRange                  → shadow mapping, which does not depend
+    //                                       on the driver answering at all
+    // So the guard is no longer what keeps 26.3-pre-3 alive, and leaving it off
+    // no longer trades correctness for speed — it is a choice about *when* to
+    // pay, and the repair path pays only on a thread that has actually failed.
+    //
+    // Worth recording for whoever touches this next: the repair sites above were
+    // dead code while the guard was on, because they gate on
+    // ScopedHostContext::Bound(), which is false unless the guard is enabled.
+    // The guard was therefore load-bearing in a way nothing stated. That
+    // coupling is gone; RepairHostContextOnce() works with the guard off.
+    //
+    // "hostContextGuard": 1 in MG/settings.json still restores the eager guard
+    // for anyone who wants the old always-on behaviour, e.g. to compare. The
+    // resolved value is logged unconditionally at the end of init_settings() so
+    // this is one line in latest.log away, rather than a silent default.
+    global_settings.host_context_guard = (hostContextGuardCfg > 0);
+    // OFF by default, matching the port source.
+    //
+    // The port source does not do this at all — its glTexSubImage2D builds an
+    // mg_upload_fix_t and hands fix.format / fix.type / fix.pixels straight to
+    // the driver, with no per-pixel work. This library routes the same four
+    // entry points (TexImage2D/3D, TexSubImage2D/3D) through
+    // swizzle_pixels_for_unpack(), which rewrites every pixel on the CPU and
+    // issues four glTexParameteri calls to reset the texture swizzle whenever
+    // it fires.
+    //
+    // That is per-pixel work at upload rate, which is why it tracks rendering
+    // rather than being a startup cost: a resource pack or Sodium streaming
+    // chunk textures pays it on every terrain update. The routine's own probe
+    // used to announce exactly that ("this is a steady per-frame cost, not
+    // startup only"), which means it was observed firing in a real session.
+    //
+    // OFF keeps correctness for the surfaces GLES accepts natively: the enums
+    // are normalised (BGRA -> RGBA, packed -> UNSIGNED_BYTE) and the bytes go
+    // up untouched. What is given up is the case where the bytes genuinely
+    // need rearranging for a format GLES will not take — a resource pack that
+    // uploads BGRA-on-a-host-without-BGRA will be wrong rather than slow.
+    // "cpuSwizzle": 1 in MG/settings.json restores the old behaviour.
+    global_settings.cpu_swizzle = (cpuSwizzleCfg > 0);
     global_settings.proc_address_own = (procAddressOwnCfg != 0);
 
     if (global_settings.angle == AngleMode::Enabled) {
@@ -323,10 +385,19 @@ void init_settings() {
           static_cast<int>(global_settings.self_promotion))
     LOG_V("[MobileGlues] Setting: activateOnCreate            = %i",
           static_cast<int>(global_settings.activate_on_create))
-    LOG_V("[MobileGlues] Setting: hostContextGuard            = %i",
-          static_cast<int>(global_settings.host_context_guard))
-    LOG_V("[MobileGlues] Setting: cpuSwizzle                  = %i",
-          static_cast<int>(global_settings.cpu_swizzle))
+    // These two are the switches that decide how much per-call and per-pixel
+    // work this layer adds, and both now default OFF (see the comments at
+    // their assignment above). Reported at a level that always reaches
+    // latest.log rather than the LOG_V stream, because a user chasing CPU
+    // load — or the 26.3-pre-3 startup that used to depend on the guard — needs
+    // to see which way they resolved without first enabling verbose logging.
+    LOG_W_FORCE("[MobileGlues] Setting: hostContextGuard            = %i (absent => 0; leaving it off is the "
+                "supported default — 0 lets a failed call be repaired where it is observed, 1 restores the "
+                "per-call check in front of every entry point)",
+                static_cast<int>(global_settings.host_context_guard))
+    LOG_W_FORCE("[MobileGlues] Setting: cpuSwizzle                  = %i (absent => 0; set \"cpuSwizzle\": 1 to force "
+                "per-pixel BGRA reordering on upload)",
+                static_cast<int>(global_settings.cpu_swizzle))
     LOG_V("[MobileGlues] Setting: procAddressOwn              = %i",
           static_cast<int>(global_settings.proc_address_own))
     if (global_settings.custom_gl_version.isEmpty()) {
@@ -401,27 +472,43 @@ struct md_entry_desc_t {
     unsigned allowed;             // backends that are a DISTINCT implementation here
     B native_backend;             // what the pseudo item "native" means here
     const char* why;              // explains a rejection, so the log says why not just "invalid"
+    const char* const* default_order; // per-entry padding order; null pads with the global default
+    int default_order_len;
 };
+
+// Elements: the batched one-call forms keep their lead when a driver actually
+// has them; on the far more common driver with no batched multi-draw at all,
+// the compute fusion leads (one fused draw per batch plus a GPU prepass) ahead
+// of the per-sub-draw loops, with Unroll as the always-available safety net and
+// Indirect last -- the same per-sub-draw call count as Unroll, costlier per call.
+const char* const k_md_default_order_elements[] = {
+    "native", "multiindirect", "multibasevertex", "compute", "unroll", "indirect",
+};
+constexpr int MD_DEFAULT_ORDER_ELEMENTS_LEN = 6;
 
 const md_entry_desc_t k_md_entries[MD_ENTRY_COUNT] = {
     {"multidrawOrderArrays", "multidrawModeArrays", "glMultiDrawArrays",
      md_bit(B::Unroll) | md_bit(B::MultiArrays) | md_bit(B::MultiIndirect),
      B::MultiArrays, // glMultiDrawArraysEXT
-     "glMultiDrawArrays draws no indices, so index-side backends do not apply"},
+     "glMultiDrawArrays draws no indices, so index-side backends do not apply", nullptr, 0},
 
-    // BaseVertex/Compute are excluded: with no base vertex to apply or rebase,
-    // they would be the same unrolled loop as Unroll.
+    // BaseVertex stays excluded: with no base vertex to apply, the basevertex
+    // backend is the same per-sub-draw loop as Unroll. Compute IS distinct --
+    // it fuses the whole batch into ONE driver draw call through GPU-side index
+    // concatenation (base vertex 0 when the caller passes none), which is the
+    // point on the many mobile drivers that ship no batched multi-draw at all.
     {"multidrawOrderElements", "multidrawModeElements", "glMultiDrawElements",
      md_bit(B::Unroll) | md_bit(B::Indirect) | md_bit(B::MultiIndirect) | md_bit(B::MultiBaseVertex) |
-         md_bit(B::MultiArrays),
+         md_bit(B::MultiArrays) | md_bit(B::Compute),
      B::MultiArrays, // glMultiDrawElementsEXT
-     "glMultiDrawElements has no base vertex, so basevertex/compute are the same loop as unroll"},
+     "glMultiDrawElements has no base vertex, so the basevertex backend is the same loop as unroll",
+     k_md_default_order_elements, MD_DEFAULT_ORDER_ELEMENTS_LEN},
 
     {"multidrawOrderElementsBaseVertex", "multidrawModeElementsBaseVertex", "glMultiDrawElementsBaseVertex",
      md_bit(B::Unroll) | md_bit(B::BaseVertex) | md_bit(B::Indirect) | md_bit(B::MultiIndirect) |
          md_bit(B::MultiBaseVertex) | md_bit(B::Compute),
      B::MultiBaseVertex, // glMultiDrawElementsBaseVertexEXT
-     "multiarrays (EXT_multi_draw_arrays) carries no base vertex"},
+     "multiarrays (EXT_multi_draw_arrays) carries no base vertex", nullptr, 0},
 
     // These two receive a command buffer from the application; the only choice is
     // whether to hand the whole batch to the driver or walk it one command at a
@@ -429,12 +516,12 @@ const md_entry_desc_t k_md_entries[MD_ENTRY_COUNT] = {
     {"multidrawOrderArraysIndirect", "multidrawModeArraysIndirect", "glMultiDrawArraysIndirect",
      md_bit(B::Indirect) | md_bit(B::MultiIndirect),
      B::MultiIndirect, // glMultiDrawArraysIndirectEXT
-     "the application supplies the commands, so only indirect/multiindirect exist here"},
+     "the application supplies the commands, so only indirect/multiindirect exist here", nullptr, 0},
 
     {"multidrawOrderElementsIndirect", "multidrawModeElementsIndirect", "glMultiDrawElementsIndirect",
      md_bit(B::Indirect) | md_bit(B::MultiIndirect),
      B::MultiIndirect, // glMultiDrawElementsIndirectEXT
-     "the application supplies the commands, so only indirect/multiindirect exist here"},
+     "the application supplies the commands, so only indirect/multiindirect exist here", nullptr, 0},
 };
 
 struct md_caps_t {
@@ -603,8 +690,13 @@ static void md_expand_order(E e, const md_order_item_t* items, int item_count) {
     }
     // Pad with the default order so a hand-edited partial list still ranks every
     // backend. "native" sits first in the default, so the entry's native form
-    // leads the padding as well.
-    for (const char* name : k_md_default_global_order) {
+    // leads the padding as well. An entry with its own default order (Elements)
+    // pads with that instead, so the backend that should lead on the common
+    // no-batched-extension driver actually leads when nothing is configured.
+    const char* const* pad = d.default_order ? d.default_order : k_md_default_global_order;
+    const int pad_len = d.default_order ? d.default_order_len : MD_GLOBAL_ITEMS;
+    for (int p = 0; p < pad_len; ++p) {
+        const char* name = pad[p];
         if (std::string(name) == "native") {
             push(d.native_backend);
         } else {
@@ -699,12 +791,21 @@ void init_settings_post() {
     const bool has_bv_ext =
         g_gles_caps.GL_EXT_draw_elements_base_vertex || g_gles_caps.GL_OES_draw_elements_base_vertex;
 
-    // A capability counts only when the extension string *and* the resolved entry
-    // point agree. The GLES loader uses a plain dlsym, so a driver can advertise
+    // A capability counts only when the entry point *and* something that vouches
+    // for it agree. The GLES loader uses a plain dlsym, so a driver can advertise
     // GL_EXT_multi_draw_indirect while the symbol is missing from the library that
     // was actually opened; trusting the string alone meant a null jump on the
     // first frame that issued a multi-draw.
-    const bool multidraw = g_gles_caps.GL_EXT_multi_draw_indirect && GLES.glMultiDrawElementsIndirectEXT != nullptr;
+    //
+    // Batched multi-draw indirect is desktop GL 4.3+ core; no GLES version ever
+    // promoted it, so on GLES only the GL_EXT_multi_draw_indirect string plus
+    // EXT symbols vouch for the batched entry points, and a null dlsym of the
+    // core names is the correct answer on a mobile driver. The 3.2-core
+    // condition below stays for hosts that forward to desktop GL. A driver
+    // exposing neither form has no batched backend -- the per-entry default
+    // orders route those devices onto the emulation backends instead.
+    const bool multidraw = (has_es32 && GLES.glMultiDrawElementsIndirect != nullptr) ||
+                           (g_gles_caps.GL_EXT_multi_draw_indirect && GLES.glMultiDrawElementsIndirectEXT != nullptr);
     const bool basevertex = (has_bv_ext || has_es32) && GLES.glDrawElementsBaseVertex != nullptr;
     const bool indirect = has_es31 && GLES.glDrawElementsIndirect != nullptr;
     // EXT/OES_draw_elements_base_vertex also define the multi-draw form, whose
@@ -732,10 +833,25 @@ void init_settings_post() {
     md_caps.indirect_arrays = has_es31 && GLES.glDrawArraysIndirect != nullptr;
     md_caps.multiindirect_elements = multidraw;
     md_caps.multiindirect_arrays =
-        g_gles_caps.GL_EXT_multi_draw_indirect && GLES.glMultiDrawArraysIndirectEXT != nullptr;
+        (has_es32 && GLES.glMultiDrawArraysIndirect != nullptr) ||
+        (g_gles_caps.GL_EXT_multi_draw_indirect && GLES.glMultiDrawArraysIndirectEXT != nullptr);
     md_caps.multibasevertex = multibasevertex;
     md_caps.multiarrays = mg_multi_draw_arrays_ext_available();
     md_caps.compute = compute;
+
+    // The dump below prints only the *filtered* chain: when every batched
+    // backend drops out of it there is nothing left there to explain why.
+    // One unconditional line at init answers "is multiindirect live on this
+    // device" without asking anyone for a debug-level log. LOG_W (non-FORCE)
+    // is gated behind GLOBAL_DEBUG and a release build silences it, which is
+    // exactly how a failed dlsym stayed invisible.
+    LOG_W_FORCE("multidraw caps: GL %d.%d coreIndirect=%p/%p EXT_multi_draw_indirect=%d EXTIndirect=%p/%p -> "
+                "multiindirect(elements=%d arrays=%d) multiarrays=%d multibasevertex=%d compute=%d",
+                g_gles_caps.major, g_gles_caps.minor, (void*)GLES.glMultiDrawElementsIndirect,
+                (void*)GLES.glMultiDrawArraysIndirect, (int)g_gles_caps.GL_EXT_multi_draw_indirect,
+                (void*)GLES.glMultiDrawElementsIndirectEXT, (void*)GLES.glMultiDrawArraysIndirectEXT,
+                (int)md_caps.multiindirect_elements, (int)md_caps.multiindirect_arrays, (int)md_caps.multiarrays,
+                (int)md_caps.multibasevertex, (int)md_caps.compute)
 
     // Filter each entry's requested order down to what this device can run. The
     // result is the runtime fallback chain; its first item is the resolved

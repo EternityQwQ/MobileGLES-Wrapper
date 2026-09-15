@@ -203,6 +203,19 @@ void destroy_temp_egl_ctx() {
 // ---------------------------------------------------------------------------
 namespace {
 
+// Does this thread hold a context it can make host GL calls on?
+//
+// `t_fb.ctx != EGL_NO_CONTEXT` is the only authoritative answer, and it is the
+// one thing BindFallbackEGLContextIfNeeded()'s return value cannot express: that
+// function returns false both when the ladder failed AND when the ladder was
+// skipped because it had already succeeded on this generation. Reading the
+// state directly removes the ambiguity its callers kept tripping over.
+//
+// Declared here rather than inline at the definition of t_fb only so the
+// reasoning lives in one place; it is the first thing RepairHostContextOnce()
+// below reaches for.
+bool HostContextIsBoundOnThisThread();
+
 struct ThreadFallback {
     EGLContext ctx = EGL_NO_CONTEXT;
     // What this context was created to share with. Rebuilt if the application's
@@ -226,6 +239,8 @@ struct ThreadFallback {
 
 thread_local ThreadFallback t_fb;
 thread_local unsigned t_seen_generation = 0;
+
+bool HostContextIsBoundOnThisThread() { return t_fb.ctx != EGL_NO_CONTEXT; }
 
 // Identifies the thread in logs. Several threads reach the fallback, and which
 // is which turned out to be the thing worth knowing.
@@ -821,18 +836,26 @@ static void RepairSdlCurrentWindow() {
 // count that lags by at most one batch is indistinguishable from an exact one.
 bool mg_egl_host_context_guard_enabled() { return global_settings.host_context_guard; }
 
-void mg_egl_note_guarded_call() {
-    static thread_local unsigned long t_calls = 0;
-    ++t_calls;
-    VerifyContextStillCurrent(t_calls);
-
-    // The repair below is the fix for the black screen, so it has to run — but
-    // it only ever matters a handful of times, and this function is on the path
+// ---------------------------------------------------------------------------
+// The SDL swap-gate tick — the trigger for RepairSdlCurrentWindow().
+//
+// This used to live only inside mg_egl_note_guarded_call(), and that placement
+// was the real-device regression: the guard's default was turned off, the note
+// stopped being called, and the SDL repair died with it. The failure it causes
+// is not a crash and not an error — the game renders every frame, audio plays,
+// touch works — but SDL refuses every swap, so eglSwapBuffers never reaches the
+// driver and nothing ever appears on screen. The reason is placement, not
+// design: whether SDL's TLS bookkeeping was lost has nothing to do with whether
+// the per-call guard runs. The tick therefore belongs on BOTH per-call paths,
+// which is what the split below expresses.
+// ---------------------------------------------------------------------------
+static void SdlSwapGateTick(unsigned long calls_on_this_thread) {
+    // It only ever matters a handful of times, and this function is on the path
     // of every single GL call. Everything expensive is therefore behind the
     // cheapest possible test first: an integer modulo on a thread-local, then
     // a plain non-atomic read. No atomic, no dlopen, no dlsym unless the cheap
     // test has already passed.
-    if ((t_calls % 5000) == 0 && !g_sdl_repair_done) {
+    if ((calls_on_this_thread % 5000) == 0 && !g_sdl_repair_done) {
         const AppRenderTarget& rt = mg_egl_app_target();
         if (rt.have_binding && rt.binding_thread == (unsigned long)pthread_self()) {
             const int n = g_sdl_repair_attempts.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -840,8 +863,26 @@ void mg_egl_note_guarded_call() {
             if (n >= 8) g_sdl_repair_done = true;
         }
     }
+}
 
+void mg_egl_note_guarded_call() {
+    static thread_local unsigned long t_calls = 0;
+    ++t_calls;
+    VerifyContextStillCurrent(t_calls);
+    SdlSwapGateTick(t_calls);
+}
 
+// The guard-off counterpart of mg_egl_note_guarded_call(). Called from
+// ScopedHostContext's guard-off branch, i.e. from every entry point in the
+// default configuration. Steady-state cost: one thread-local increment and one
+// modulo — no EGL call, no lock. RepairHostContextOnce() did not cover this
+// because it only runs after an observed failure, and a refused swap produces
+// no failure this library can see: SDL checks its own TLS and sets its own
+// error before eglSwapBuffers is ever reached.
+void mg_egl_note_unguarded_call() {
+    static thread_local unsigned long t_calls = 0;
+    ++t_calls;
+    SdlSwapGateTick(t_calls);
 }
 
 // Pairs a successful BindFallbackEGLContextIfNeeded().
@@ -850,6 +891,176 @@ void mg_egl_note_guarded_call() {
 // thread. Releasing it would reintroduce the per-call churn that corrupts
 // driver state, and the window in which another thread could take it.
 void UnbindFallbackEGLContext() {}
+
+// ---------------------------------------------------------------------------
+// Lazy repair
+//
+// See the declaration in loader.h for why this exists. In short: the eager
+// guard asks the driver a question on every call; this asks at most once per
+// thread, and only when an entry point has already seen a result it cannot
+// trust.
+//
+// Two pieces of thread-local state:
+//
+//   t_repair_ok / t_repair_ok_generation
+//       "The question was already answered for this generation." Set once the
+//       outcome is settled, whether that outcome was success or failure, because
+//       both are equally expensive to re-derive and neither can change until the
+//       application's render target moves. It is NOT a claim that a context is
+//       bound — that fact is read from t_fb, which is the only thing that knows
+//       it. Naming this "ok" is history; it means "handled".
+//   t_reported_no_context / t_reported_other_cause
+//       Independent one-shot guards, one per diagnosis, so each is logged once
+//       per thread without either silencing the other.
+//
+// Both the generation and a separate flag are needed, and the reason is the
+// startup case. Before the application creates its first window surface the
+// generation is 0 and stays there, so a generation-only memory would consider
+// itself unanswered on every single call and re-run the whole ladder — which is
+// the expensive part, since it tries eglMakeCurrent. The flag makes the startup
+// window paid for once too.
+//
+// The generation is then only consulted to detect a *change*: when the
+// application replaces its surface, a context that was current can stop being
+// current, and the thread must not keep believing otherwise. A flag alone would
+// do exactly that, and the thread would skip every future repair while all its
+// calls were being discarded — the silent failure this mechanism exists to
+// prevent.
+//
+// Note this is deliberately weaker than "verify the context is still current":
+// it never calls eglGetCurrentContext() once the thread is known good. The
+// whole point is to stop paying that per call. A context lost without a
+// generation change is still caught, but by the caller noticing a bad result
+// and calling back in — which is the contract: this function is only ever
+// reached because something already failed.
+// ---------------------------------------------------------------------------
+// The shared answer to "does this thread have a context?"
+//
+// Both ScopedHostContext (asking before a call) and RepairHostContextOnce()
+// (asking after one failed) need this, and they must agree: a thread repaired
+// through one path has to be considered usable by the other, or every later
+// entry point re-runs the ladder that the first one already paid for.
+//
+// So there is one memory, not two. It is per thread and per generation:
+//
+//   t_ctx_settled / t_ctx_settled_generation
+//       "The question was answered for this generation." Set whether the
+//       outcome was success or failure, because both are equally expensive to
+//       re-derive and neither can change until the application replaces its
+//       render target. It is NOT a claim that a context is bound — that is read
+//       from t_fb, the only thing that knows it.
+//
+// The generation is consulted to detect a *change*. A bare flag would be wrong:
+// when the application swaps its surface, a context that was current can stop
+// being current, and a thread that kept believing otherwise would skip every
+// future repair while all its calls were discarded — the silent failure this
+// whole mechanism exists to prevent.
+//
+// Note the deliberate weakness: once a thread is settled, this never calls
+// eglGetCurrentContext(). That is the entire point — it is the per-call cost
+// this branch set out to remove. A context lost without a generation change is
+// still caught, but by the caller noticing a bad result and asking again,
+// which is what RepairHostContextOnce() is for.
+// ---------------------------------------------------------------------------
+// The state both entry points read. File scope rather than function-local so
+// EnsureHostContextSettled() can observe it without duplicating the memory —
+// two copies of this flag is exactly the disagreement this design avoids.
+static thread_local bool t_ctx_settled = false;
+static thread_local unsigned t_ctx_settled_generation = 0;
+
+bool EnsureHostContextSettled(unsigned generation) {
+    return t_ctx_settled && t_ctx_settled_generation == generation;
+}
+
+bool EnsureHostContextOnce() {
+    const unsigned gen = mg_egl_app_target_generation();
+    if (EnsureHostContextSettled(gen)) return false;  // answered already
+
+    // Ask the state, not the ladder's return value.
+    //
+    // BindFallbackEGLContextIfNeeded() returns false in two situations that
+    // mean opposite things: "could not bind" and "did not need to, this
+    // generation was already handled". Treating the second as a failure is not
+    // hypothetical — it is what the first version of the repair did, and it
+    // made a thread that already had a context re-run the whole ladder
+    // (eglMakeCurrent included) on every later call while logging that no
+    // context could be bound for a thread that had one.
+    const bool had_context = HostContextIsBoundOnThisThread();
+    if (!had_context) {
+        BindFallbackEGLContextIfNeeded();
+    }
+
+    t_ctx_settled = true;
+    t_ctx_settled_generation = gen;
+
+    // True only when this call is what installed the context.
+    return !had_context && HostContextIsBoundOnThisThread();
+}
+
+// ---------------------------------------------------------------------------
+// RepairHostContextOnce() — the same question, asked after a failure
+// ---------------------------------------------------------------------------
+bool RepairHostContextOnce() {
+    // Two independent one-shot guards, not one shared counter. They report two
+    // different faults, and a single counter made the first to fire silence the
+    // other — which meant a thread that once failed for an unrelated reason
+    // could never report the far more serious "this thread has no context at
+    // all" for the rest of its life. Found by a test that ran the two cases in
+    // sequence; it is exactly the kind of interaction that is invisible when
+    // each path is read on its own.
+    static thread_local bool t_reported_other_cause = false;
+    static thread_local bool t_reported_no_context = false;
+
+    const unsigned gen = mg_egl_app_target_generation();
+    const bool was_bound_before = HostContextIsBoundOnThisThread();
+
+    if (was_bound_before && EnsureHostContextSettled(gen)) {
+        // A context is present and the question is settled for this generation.
+        // The caller's failure is not the missing-context mode; say so once and
+        // let it retry, because a 0 from glCreateShader on a thread that HAS a
+        // context is a different bug worth one line.
+        if (!t_reported_other_cause) {
+            t_reported_other_cause = true;
+            LOG_W_FORCE("RepairHostContextOnce: [%s] a host call returned a failure value while a context WAS current "
+                        "on this thread; the call has been retried, and if it fails again the cause is elsewhere.",
+                        CurrentThreadLabel());
+        }
+        return true;
+    }
+
+    if (!EnsureHostContextOnce()) {
+        if (was_bound_before) {
+            // Already had one; nothing was installed, but the thread is usable.
+            if (!t_reported_other_cause) {
+                t_reported_other_cause = true;
+                LOG_W_FORCE("RepairHostContextOnce: [%s] a host call returned a failure value while a context WAS "
+                            "current on this thread; the call has been retried, and if it fails again the cause is "
+                            "elsewhere.",
+                            CurrentThreadLabel());
+            }
+            return true;
+        }
+
+        // Nothing could be installed. The caller is going to fail the operation
+        // anyway, and the outcome is remembered for the generation so the ladder
+        // is not re-run, eglMakeCurrent and all, on every subsequent call.
+        //
+        // Reported once per thread: a thread that cannot get a context has now
+        // been proven to be in that state by an actual failure, which is
+        // stronger evidence than a periodic poke would be.
+        if (!t_reported_no_context) {
+            t_reported_no_context = true;
+            LOG_W_FORCE("RepairHostContextOnce: [%s] a host call failed and this thread still has no context; "
+                        "every host GL call from it will be discarded without error until the application's "
+                        "render target changes.",
+                        CurrentThreadLabel());
+        }
+        return false;
+    }
+
+    // This call installed the context, so the caller must retry exactly once.
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Self-promotion into the global symbol scope

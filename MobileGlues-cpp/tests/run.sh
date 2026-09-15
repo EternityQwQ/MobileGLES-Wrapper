@@ -12,3 +12,5 @@ $CXX -o /tmp/mg_fb_test     tests/framebuffer_shuffle_test.cpp gl/framebuffer.cp
 /tmp/mg_pixel_test
 echo
 /tmp/mg_fb_test
+$CXX -o /tmp/mg_md_order_test tests/md_order_test.cpp
+/tmp/mg_md_order_test

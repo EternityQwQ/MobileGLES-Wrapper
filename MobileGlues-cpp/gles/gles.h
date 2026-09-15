@@ -475,6 +475,15 @@ extern "C"
                     GLsizei stride)
     GL_FUNC_TYPEDEF(void, glMultiDrawElementsIndirectEXT, GLenum mode, GLenum type, const void* indirect,
                     GLsizei drawcount, GLsizei stride)
+    // GLES 3.2 core forms of the two above (promoted from EXT_multi_draw_indirect).
+    // GLES 3.1 only has the singular glDrawArraysIndirect/glDrawElementsIndirect;
+    // the batched forms are 3.2 core. Adreno exposes 3.2 but not the extension
+    // string, so resolving only the EXT names left every batched indirect
+    // backend unusable and pushed every multi-draw down to per-sub-draw loops.
+    GL_FUNC_TYPEDEF(void, glMultiDrawArraysIndirect, GLenum mode, const void* indirect, GLsizei drawcount,
+                    GLsizei stride)
+    GL_FUNC_TYPEDEF(void, glMultiDrawElementsIndirect, GLenum mode, GLenum type, const void* indirect,
+                    GLsizei drawcount, GLsizei stride)
     GL_FUNC_TYPEDEF(void, glBruh)
     GL_FUNC_TYPEDEF(void, glMultiDrawElementsBaseVertexEXT, GLenum mode, const GLsizei* count, GLenum type,
                     const void* const* indices, GLsizei drawcount, const GLint* basevertex)
@@ -851,6 +860,8 @@ extern "C"
 
         GL_FUNC_DECL(glMultiDrawArraysIndirectEXT)
         GL_FUNC_DECL(glMultiDrawElementsIndirectEXT)
+        GL_FUNC_DECL(glMultiDrawArraysIndirect)
+        GL_FUNC_DECL(glMultiDrawElementsIndirect)
         GL_FUNC_DECL(glMultiDrawElementsBaseVertexEXT)
 
         GL_FUNC_DECL(glBruh)

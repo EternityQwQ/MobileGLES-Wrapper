@@ -33,6 +33,7 @@
 // error. The extern "C" must match multidraw.h's block or the two become
 // different symbols.
 extern "C" void mg_multidraw_buffer_invalidated(GLuint virtual_name);
+extern "C" void mg_multidraw_ssbo_touched(void);
 
 // ============================================================================
 // Thread-local scratch buffer cache
@@ -553,6 +554,9 @@ void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
         // The name is about to be free for reuse with a different allocation, so
         // any cached size for it is now wrong.
         mg_multidraw_buffer_invalidated(buffers[i]);
+        // Deleting a bound buffer unbinds it driver-side, both generic and
+        // indexed; any cached SSBO binding naming it is now stale.
+        mg_multidraw_ssbo_touched();
         // Clean up any PBO shadow data for this buffer.
         pbo_shadow_delete(buffers[i]);
         remove_buffer(buffers[i]);
@@ -574,6 +578,9 @@ void glBindBuffer(GLenum target, GLuint buffer) {
     LOG()
     LOG_D("glBindBuffer, target = %s, buffer = %d", glEnumToString(target), buffer)
     set_bound_buffer_by_target(target, buffer);
+    // The multidraw fusion caches the SSBO bindings across batches; this is a
+    // writer, so the cache has to go stale before the next fused draw.
+    if (target == GL_SHADER_STORAGE_BUFFER) mg_multidraw_ssbo_touched();
     // save ibo binding to vao
     if (target == GL_ELEMENT_ARRAY_BUFFER) {
         update_vao_ibo_binding(find_bound_array(), buffer);
@@ -622,7 +629,13 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
         mg_multidraw_buffer_invalidated(g_bound_buffers_arr[idx]);
         // Sync PBO shadow for GL_PIXEL_UNPACK_BUFFER. Use idx (already known)
         // instead of re-checking target.
-        if (idx == BI_PIXEL_UNPACK) {
+        //
+        // Gated on cpu_swizzle: the shadow's only consumers are the BGRA
+        // swizzle (texture.cpp) and the DSA map redirection, both of which are
+        // dead once the swizzle is off. Keeping the shadow alive anyway meant
+        // every PBO allocation paid a full-size CPU copy under a global lock
+        // for data nobody would ever read.
+        if (idx == BI_PIXEL_UNPACK && global_settings.cpu_swizzle) {
             pbo_shadow_alloc(g_bound_buffers_arr[idx], size, data);
         }
     }
@@ -636,7 +649,8 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void
     GLES.glBufferSubData(target, offset, size, data);
     // Sync PBO shadow for GL_PIXEL_UNPACK_BUFFER. target is known at this
     // point so index g_bound_buffers_arr directly (skip the switch).
-    if (target == GL_PIXEL_UNPACK_BUFFER) {
+    // Gated on cpu_swizzle — see glBufferData above for why.
+    if (target == GL_PIXEL_UNPACK_BUFFER && global_settings.cpu_swizzle) {
         pbo_shadow_subdata(g_bound_buffers_arr[BI_PIXEL_UNPACK], offset, size, data);
     }
     CHECK_GL_ERROR
@@ -861,13 +875,20 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
     // data directly from CPU memory. The actual GLES buffer is still mapped
     // and the shadow will be synced to GLES on glUnmapBuffer.
     //
+    // Gated on cpu_swizzle. The redirection exists ONLY so the swizzle can
+    // read CPU-side bytes; with the swizzle off it replaced the driver's own
+    // mapped pointer with a heap copy that no one reads, then pushed the
+    // touched range back with glBufferSubData on unmap — allocation, lock and
+    // copy all spent to slow the upload down. With the gate, this is the
+    // plain GLES path: map the real buffer, write it, unmap.
+    //
     // Hot path: a single combined locked lookup (pbo_shadow_ensure_and_map_write)
     // replaces the previous 3-lock sequence (pbo_shadow_get + pbo_shadow_alloc
     // + pbo_shadow_map_write). Under high CPU load the lock-acquisition jitter
     // from 3 separate acquisitions was a measurable source of frame-time
     // variance; collapsing them into one critical section stabilises the
     // upload path.
-    if (target == GL_PIXEL_UNPACK_BUFFER && (access & GL_MAP_WRITE_BIT)) {
+    if (global_settings.cpu_swizzle && target == GL_PIXEL_UNPACK_BUFFER && (access & GL_MAP_WRITE_BIT)) {
         // target == GL_PIXEL_UNPACK_BUFFER implies binding_target_to_index()
         // returns BI_PIXEL_UNPACK (never -1), so skip the switch and index the
         // binding table directly on this hot path.
@@ -948,13 +969,20 @@ GLboolean glUnmapBuffer(GLenum target) {
     // glMapBufferRange(GL_MAP_READ_BIT)). Syncing only the mapped range
     // avoids uploading the whole shadow when the app mapped a small slice.
     //
+    // Gated on cpu_swizzle, in lockstep with the map-side gate in
+    // glMapBufferRange: with the swizzle off the map is the driver's own
+    // mapped pointer, so the unmap below must also be the driver's. Before
+    // the gate this branch returned GL_TRUE for EVERY PBO unmap without ever
+    // calling the host — correct only while the map side redirected to the
+    // shadow, and a driver-side mapping leak once the gate made the map real.
+    //
     // Hot path: pbo_shadow_unmap_and_get_range collapses the previous
     // 2-lock sequence (pbo_shadow_get_mapped_range + pbo_shadow_unmap) into
     // a single locked lookup. Under high CPU load the lock-acquisition
     // jitter from 2 separate acquisitions was a measurable source of
     // frame-time variance; collapsing them into one critical section
     // stabilises the upload path.
-    if (target == GL_PIXEL_UNPACK_BUFFER) {
+    if (global_settings.cpu_swizzle && target == GL_PIXEL_UNPACK_BUFFER) {
         // target == GL_PIXEL_UNPACK_BUFFER implies binding_target_to_index()
         // returns BI_PIXEL_UNPACK (never -1), so skip the switch and index the
         // binding table directly on this hot path.
@@ -1025,6 +1053,11 @@ void bindAllAtomicCounterAsSSBO() {
         if (buf.id != 0) {
             GLuint realID = find_real_buffer(buf.id);
             GLES.glBindBufferRange(GL_SHADER_STORAGE_BUFFER, i, realID, buf.offset, buf.size);
+            // This file writes the SSBO bindings directly through GLES,
+            // bypassing glBindBufferBase/Range, so the fusion cache has to be
+            // told by hand.
+            track_ssbo_indexed(i, realID);
+            mg_multidraw_ssbo_touched();
             LOG_D("Bound atomic counter buffer %u(real: %u) as SSBO at index %zu", buf.id, realID, i);
         }
     }
@@ -1038,14 +1071,14 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offs
 
     if (buffer == 0) {
         GLES.glBindBufferRange(target, index, buffer, offset, size);
-        if (target == GL_SHADER_STORAGE_BUFFER) track_ssbo_indexed(index, 0);
+        if (target == GL_SHADER_STORAGE_BUFFER) { track_ssbo_indexed(index, 0); mg_multidraw_ssbo_touched(); }
         CHECK_GL_ERROR
         return;
     }
     auto [real_buffer, exists] = find_real_buffer_with_exists(buffer);
     if (!exists) {
         GLES.glBindBufferRange(target, index, buffer, offset, size);
-        if (target == GL_SHADER_STORAGE_BUFFER) track_ssbo_indexed(index, buffer);
+        if (target == GL_SHADER_STORAGE_BUFFER) { track_ssbo_indexed(index, buffer); mg_multidraw_ssbo_touched(); }
         CHECK_GL_ERROR
         return;
     }
@@ -1072,6 +1105,7 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offs
         }
     } else if (target == GL_SHADER_STORAGE_BUFFER) {
         track_ssbo_indexed(index, real_buffer);
+        mg_multidraw_ssbo_touched();
     }
     CHECK_GL_ERROR
 }
@@ -1083,14 +1117,14 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
 
     if (buffer == 0) {
         GLES.glBindBufferBase(target, index, buffer);
-        if (target == GL_SHADER_STORAGE_BUFFER) track_ssbo_indexed(index, 0);
+        if (target == GL_SHADER_STORAGE_BUFFER) { track_ssbo_indexed(index, 0); mg_multidraw_ssbo_touched(); }
         CHECK_GL_ERROR
         return;
     }
     auto [real_buffer, exists] = find_real_buffer_with_exists(buffer);
     if (!exists) {
         GLES.glBindBufferBase(target, index, buffer);
-        if (target == GL_SHADER_STORAGE_BUFFER) track_ssbo_indexed(index, buffer);
+        if (target == GL_SHADER_STORAGE_BUFFER) { track_ssbo_indexed(index, buffer); mg_multidraw_ssbo_touched(); }
         CHECK_GL_ERROR
         return;
     }
@@ -1102,6 +1136,7 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     GLES.glBindBufferBase(target, index, real_buffer);
     if (target == GL_SHADER_STORAGE_BUFFER) {
         track_ssbo_indexed(index, real_buffer);
+        mg_multidraw_ssbo_touched();
     }
     CHECK_GL_ERROR
 }
@@ -1275,7 +1310,10 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
                 mg_multidraw_buffer_invalidated(g_bound_buffers_arr[idx]);
                 if (target == GL_PIXEL_UNPACK_BUFFER) {
                     set_buffer_data_size(g_bound_buffers_arr[idx], size);
-                    pbo_shadow_alloc(g_bound_buffers_arr[idx], size, data);
+                    // Shadow sync is swizzle-only — see glBufferData.
+                    if (global_settings.cpu_swizzle) {
+                        pbo_shadow_alloc(g_bound_buffers_arr[idx], size, data);
+                    }
                 }
             }
         }

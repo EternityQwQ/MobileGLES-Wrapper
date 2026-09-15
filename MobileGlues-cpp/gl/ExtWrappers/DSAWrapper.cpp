@@ -465,7 +465,10 @@ void glNamedBufferStorage(GLuint buffer, GLsizeiptr size, const void* data, GLbi
     // the CPU copy directly instead of falling back to glCopyBufferSubData,
     // which may be incomplete on the first frame and produce a brief colour
     // glitch until the shadow is lazily established by a later map.
-    pbo_shadow_alloc(buffer, size, data);
+    // Shadow sync is swizzle-only: with cpu_swizzle off the shadow has no
+    // consumer, and allocating a full-size CPU copy of every buffer would be
+    // pure waste. See glBufferData in buffer.cpp.
+    if (global_settings.cpu_swizzle) pbo_shadow_alloc(buffer, size, data);
 
     LOG_D("[DSA] Buffer %u stored with size %lld", buffer, size);
 }
@@ -485,7 +488,7 @@ void glNamedBufferData(GLuint buffer, GLsizeiptr size, const void* data, GLenum 
     }
     CHECK_GL_ERROR;
     // Mirror glBufferData's PBO shadow sync; see glNamedBufferStorage.
-    pbo_shadow_alloc(buffer, size, data);
+    if (global_settings.cpu_swizzle) pbo_shadow_alloc(buffer, size, data);
 
     LOG_D("[DSA] Buffer %u data set with size %lld", buffer, size);
 }
@@ -505,7 +508,7 @@ void glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const
     }
     CHECK_GL_ERROR;
     // Mirror glBufferSubData's PBO shadow sync; see glNamedBufferStorage.
-    pbo_shadow_subdata(buffer, offset, size, data);
+    if (global_settings.cpu_swizzle) pbo_shadow_subdata(buffer, offset, size, data);
 
     LOG_D("[DSA] Buffer %u sub-data set with size %lld at offset %lld", buffer, size, offset);
 }

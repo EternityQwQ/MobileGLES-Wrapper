@@ -825,9 +825,23 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
                                               GLuint* outPboToRestore) {
     if (outPboToRestore) *outPboToRestore = 0;
 
+    if (!global_settings.cpu_swizzle) {
+        // What the port source does: fix up the enums, leave the bytes alone.
+        if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
+        if (format == GL_BGRA) format = GL_RGBA;
+        return pixels;
+    }
+
     // Counted once per process, then never again: whether these paths are hit at
-    // all is the question, and a counter answered at the top costs one relaxed
-    // load per call rather than anything per pixel.
+    // all is the question, and a counter answered here costs one relaxed load
+    // per call rather than anything per pixel.
+    //
+    // Below the early return on purpose. This probe used to sit above it, so it
+    // counted (and announced) every upload whose format merely *would* have
+    // needed a swizzle, whether or not one was performed — with cpuSwizzle off
+    // it reported the per-pixel path as hit while the bytes went up untouched.
+    // A diagnostic that fires when the cost it describes is not being paid is
+    // worse than none: it sends the next reader after the wrong line.
     //
     // The port source has no such routine — it hands the driver fix.format /
     // fix.type / fix.pixels and does no per-pixel work — so if this fires during
@@ -852,12 +866,6 @@ static const void* swizzle_pixels_for_unpack(GLenum internalFormat, GLenum& form
         }
     }
 
-    if (!global_settings.cpu_swizzle) {
-        // What the port source does: fix up the enums, leave the bytes alone.
-        if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) type = GL_UNSIGNED_BYTE;
-        if (format == GL_BGRA) format = GL_RGBA;
-        return pixels;
-    }
     // PBO-bound path: when a GL_PIXEL_UNPACK_BUFFER is bound, `pixels` is a
     // byte offset into that PBO, NOT a real CPU pointer. To do CPU-side
     // swizzle we first map the PBO for reading, copy+swizzle the relevant
@@ -1508,7 +1516,44 @@ void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat, GLsize
           target, levels, internalFormat, width, height)
 
     internal_convert(&internalFormat, nullptr, nullptr);
-    GLES.glTexStorage2D(target, levels, internalFormat, width, height);
+
+    // The error check below used to run on every call. glGetError is an
+    // implicit glFinish on most drivers — asking for the error queue makes the
+    // CPU wait for the GPU to drain — and this path is not a one-off: it is
+    // where a texture's immutable storage is allocated, i.e. every resource-
+    // pack texture and every dynamically sized render target. A full pipeline
+    // flush per allocation is visible as CPU load that tracks rendering and
+    // disappears when it stops.
+    //
+    // gl/buffer.cpp:glBufferStorageEXT had the identical bug and was fixed the
+    // same way: whether this host accepts a given (target, format) is not
+    // intermittent — it answers the same way every time — so a few early
+    // probes see whatever there is to see and the question is then never asked
+    // again. This site was simply missed in that pass.
+    static std::atomic<int> tex_storage_probe_budget{8};
+    const bool probe = GLES.glGetError && tex_storage_probe_budget.load(std::memory_order_relaxed) > 0;
+
+    if (!probe) {
+        GLES.glTexStorage2D(target, levels, internalFormat, width, height);
+    } else {
+        tex_storage_probe_budget.fetch_sub(1, std::memory_order_relaxed);
+
+        // Clear pending errors first, otherwise the check reports something
+        // earlier work left behind and blames this allocation for it.
+        for (int drain = 0; drain < 8; ++drain) {
+            if (GLES.glGetError() == GL_NO_ERROR) break;
+        }
+        GLES.glTexStorage2D(target, levels, internalFormat, width, height);
+
+        const GLenum err = GLES.glGetError();
+        if (err != GL_NO_ERROR) {
+            LOG_W_FORCE("glTexStorage2D was rejected: target=0x%x levels=%d internalFormat=0x%x %dx%d "
+                        "glError=0x%x — the texture has no storage, so a later upload into it will fail. "
+                        "Probed on the first few calls only: glGetError stalls the pipeline, so asking per "
+                        "call is what costs the frame rate.",
+                        target, levels, internalFormat, width, height, err);
+        }
+    }
 
     GET_TEXTURE_OBJECT(target);
     tex->target = ConvertGLEnumToTextureTarget(target);
@@ -1520,9 +1565,6 @@ void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat, GLsize
     tex->swizzle_param[1] = GL_GREEN;
     tex->swizzle_param[2] = GL_BLUE;
     tex->swizzle_param[3] = GL_ALPHA;
-
-    GLenum ERR = GLES.glGetError();
-    if (ERR != GL_NO_ERROR) LOG_E("glTexStorage2D ERROR: %d", ERR)
 }
 
 // --- glTexStorage3D (native) ---
