@@ -266,7 +266,44 @@ NATIVE_FUNCTION_HEAD(GLint, glGetProgramResourceLocation, GLuint program, GLenum
 
 NATIVE_FUNCTION_HEAD(void, glUseProgramStages, GLuint pipeline, GLbitfield stages, GLuint program) NATIVE_FUNCTION_END_NO_RETURN(void, glUseProgramStages, pipeline,stages,program)
 NATIVE_FUNCTION_HEAD(void, glActiveShaderProgram, GLuint pipeline, GLuint program) NATIVE_FUNCTION_END_NO_RETURN(void, glActiveShaderProgram, pipeline,program)
-NATIVE_FUNCTION_HEAD(GLuint, glCreateShaderProgramv, GLenum type, GLsizei count, const GLchar *const*strings) NATIVE_FUNCTION_END(GLuint, glCreateShaderProgramv, type,count,strings)
+
+// Not a plain forward. glCreateShaderProgramv is the one entry point in this
+// file whose failure is both observable and silently absorbed by a missing
+// context, which is the shape that already cost this project a black screen
+// once — see "give workers a context with the guard off" in the history, where
+// glCreateShader was repaired while glShaderSource and glCompileShader were
+// not, so the shader had no source, every program failed to link, and the
+// world stopped drawing while the UI and audio kept working.
+//
+// This call is worse than any single one of those, because it is all four
+// steps at once (create → source → compile → link → program) and the caller
+// sees a single 0. A worker thread with no current context that reaches this
+// gets nothing back and nothing logged.
+//
+// 0 is unambiguous here — no valid program name is 0 — so unlike the device
+// limits in getter.cpp this needs no whitelist, and unlike the boolean query
+// repaired in enable.cpp it needs no sentinel: the return value carries the
+// whole answer.
+//
+// The repair costs nothing until the failure happens. A call that succeeds,
+// which is every call on a thread that has a context, never reaches it.
+extern "C" GLAPI GLAPIENTRY GLuint glCreateShaderProgramvARB(GLenum type, GLsizei count,
+                                                              const GLchar* const* strings)
+    __attribute__((alias("glCreateShaderProgramv")));
+extern "C" GLAPI GLAPIENTRY GLuint glCreateShaderProgramv(GLenum type, GLsizei count,
+                                                          const GLchar* const* strings) {
+    GLuint program = GLES.glCreateShaderProgramv(type, count, strings);
+    if (program == 0 && RepairHostContextOnce()) {
+        program = GLES.glCreateShaderProgramv(type, count, strings);
+        if (program != 0) {
+            LOG_W_FORCE("glCreateShaderProgramv returned 0 until MobileGLES bound a fallback EGL context, then "
+                        "returned %u (type=0x%x, count=%d). The calling thread had no current EGL context.",
+                        program, type, count);
+        }
+    }
+    return program;
+}
+
 NATIVE_FUNCTION_HEAD(void, glBindProgramPipeline, GLuint pipeline) NATIVE_FUNCTION_END_NO_RETURN(void, glBindProgramPipeline, pipeline)
 NATIVE_FUNCTION_HEAD(void, glDeleteProgramPipelines, GLsizei n, const GLuint *pipelines) NATIVE_FUNCTION_END_NO_RETURN(void, glDeleteProgramPipelines, n,pipelines)
 NATIVE_FUNCTION_HEAD(void, glGenProgramPipelines, GLsizei n, GLuint *pipelines) NATIVE_FUNCTION_END_NO_RETURN(void, glGenProgramPipelines, n,pipelines)
