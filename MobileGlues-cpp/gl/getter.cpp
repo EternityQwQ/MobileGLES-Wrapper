@@ -23,6 +23,8 @@
 
 #define DEBUG 0
 
+#include <atomic>
+
 // ScopedHostContext now lives in egl/loader.h so that gl/buffer.cpp can use
 // the same mechanism for host buffer operations.
 
@@ -232,21 +234,51 @@ GLint QueryHostInt(GLenum pname) {
 constexpr int kMaxCacheEntries = 32;
 GLenum g_cache_pnames[kMaxCacheEntries];
 GLint g_cache_values[kMaxCacheEntries];
-int g_cache_count = 0;
+// Atomic because the hit path reads it without the mutex. Entries below the
+// published count are immutable once visible — the arrays are append-only and
+// an entry is never rewritten — so a lock-free reader can trust any prefix it
+// observes.
+std::atomic<int> g_cache_count{0};
 std::mutex g_cache_mutex;
 
 GLint CachedHostInt(GLenum pname) {
+    // Fast path: a hit is a plain read of an array that is only ever grown.
+    //
+    // This used to take g_cache_mutex on every call, including the hits. The
+    // entries are written at most kMaxCacheEntries times in the life of the
+    // process (the first time each enum is asked for) and read on every
+    // later query, so the lock was being taken exclusively for the rare case
+    // and cost a contended atomic pair for the common one. glGetIntegerv is
+    // not a rare call: mods and the vanilla renderer both drive per-frame
+    // limit queries through here.
+    //
+    // Ordering note: g_cache_count is published with a release store after the
+    // two arrays are written, and read here with a relaxed load first only to
+    // bound the scan. A reader that observes a count of N is guaranteed by the
+    // release/acquire pair on the slow path to observe the N entries that were
+    // written before it; entries beyond the count it observed it simply will
+    // not see yet, which is the same as asking before they were cached.
+    const int cached_count = g_cache_count.load(std::memory_order_acquire);
+    for (int i = 0; i < cached_count; ++i) {
+        if (g_cache_pnames[i] == pname) return g_cache_values[i];
+    }
+
     std::lock_guard<std::mutex> lock(g_cache_mutex);
 
-    for (int i = 0; i < g_cache_count; ++i) {
+    // Re-check under the lock: a second thread may have inserted this enum
+    // while this one was on its way in.
+    for (int i = 0; i < g_cache_count.load(std::memory_order_relaxed); ++i) {
         if (g_cache_pnames[i] == pname) return g_cache_values[i];
     }
 
     const GLint value = QueryHostInt(pname);
-    if (value > 0 && g_cache_count < kMaxCacheEntries) {
-        g_cache_pnames[g_cache_count] = pname;
-        g_cache_values[g_cache_count] = value;
-        ++g_cache_count;
+    const int count = g_cache_count.load(std::memory_order_relaxed);
+    if (value > 0 && count < kMaxCacheEntries) {
+        g_cache_pnames[count] = pname;
+        g_cache_values[count] = value;
+        // Release: the two writes above must be visible to any thread that
+        // later reads the new count.
+        g_cache_count.store(count + 1, std::memory_order_release);
     }
     return value;
 }
@@ -374,13 +406,22 @@ void glGetIntegerv(GLenum pname, GLint* params) {
     }
 
     // -------------------------------------------------------------------------
-    // Static device limits — queried once and cached.
+    // Static device limits — answered from the host, memoized per enum.
     //
-    // These are properties of the GPU, so the answer never changes. But they
-    // were cached unconditionally: a query that ran while this thread had no
-    // current EGL context stored 0 and returned it for the rest of the session.
-    // CachedHostInt() retries under MobileGLES' fallback context and only
-    // memorizes a value the host actually reported.
+    // These are properties of the GPU, so the answer never changes. Caching is
+    // done by CachedHostInt(), which keys on pname.
+    //
+    // This block used to end in `static const GLint cached =
+    // limitguard::CachedHostInt(pname);`, one function-local static shared by
+    // all nine enums below it. A function-local static initialises ONCE, on the
+    // first execution of the block — and the initialiser's pname is whatever
+    // the first caller passed. So the enum queried first was the only one ever
+    // answered correctly: every other enum in the list returned that first
+    // value for the rest of the session. GL_MAX_DRAW_BUFFERS came back as the
+    // max vertex attribs, GL_MAX_TEXTURE_SIZE as the max draw buffers, and so
+    // on — silently, with no error, and plausibly enough that nothing failed
+    // loudly. CachedHostInt() already keys on pname, so the extra layer was
+    // both redundant and wrong: dropping it is the fix.
     // -------------------------------------------------------------------------
     case GL_MAX_VERTEX_ATTRIBS:
     case GL_MAX_DRAW_BUFFERS:
@@ -391,8 +432,7 @@ void glGetIntegerv(GLenum pname, GLint* params) {
     case GL_MAX_CUBE_MAP_TEXTURE_SIZE:
     case GL_MAX_RENDERBUFFER_SIZE:
     case GL_MAX_SAMPLES: {
-        static const GLint cached = limitguard::CachedHostInt(pname);
-        (*params) = cached;
+        (*params) = limitguard::CachedHostInt(pname);
         break;
     }
 
