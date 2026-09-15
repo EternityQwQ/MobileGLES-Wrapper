@@ -849,40 +849,64 @@ bool mg_egl_host_context_guard_enabled() { return global_settings.host_context_g
 // the per-call guard runs. The tick therefore belongs on BOTH per-call paths,
 // which is what the split below expresses.
 // ---------------------------------------------------------------------------
-static void SdlSwapGateTick(unsigned long calls_on_this_thread) {
-    // It only ever matters a handful of times, and this function is on the path
-    // of every single GL call. Everything expensive is therefore behind the
-    // cheapest possible test first: an integer modulo on a thread-local, then
-    // a plain non-atomic read. No atomic, no dlopen, no dlsym unless the cheap
-    // test has already passed.
-    if ((calls_on_this_thread % 5000) == 0 && !g_sdl_repair_done) {
-        const AppRenderTarget& rt = mg_egl_app_target();
-        if (rt.have_binding && rt.binding_thread == (unsigned long)pthread_self()) {
-            const int n = g_sdl_repair_attempts.fetch_add(1, std::memory_order_relaxed) + 1;
-            RepairSdlCurrentWindow();
-            if (n >= 8) g_sdl_repair_done = true;
-        }
+// The attempt counter is per thread and counts DOWN to zero, so the test below
+// is a compare-against-zero rather than a remainder.
+//
+// It used to be `(calls_on_this_thread % 5000) == 0`. 5000 is not a power of
+// two, so the compiler cannot fold that into a shift: it emits a full integer
+// division — the reciprocal multiply plus the multiply-subtract correction —
+// on every single GL call, on every thread, to answer a question whose answer
+// is "no" 4999 times out of 5000. At the call rates this library sees (three
+// hundred thousand calls in twenty seconds, from one thread) that is a
+// division costing tens of cycles, several thousand times a second, feeding a
+// repair that is needed a handful of times per process.
+//
+// The countdown is equivalent in what it schedules — an attempt every 5000
+// calls — and costs one decrement and one branch.
+constexpr unsigned long kSdlRepairInterval = 5000;
+
+static void SdlSwapGateTick(unsigned long& countdown) {
+    // Cheapest possible test first: a decrement of a thread-local and a branch
+    // on the flag it produces. Everything expensive — the atomic fetch_add, the
+    // dlopen, the dlsym — sits behind this and runs only on the one call in
+    // 5000 that reaches it.
+    if (--countdown != 0) return;
+    countdown = kSdlRepairInterval;
+
+    if (g_sdl_repair_done) return;
+
+    const AppRenderTarget& rt = mg_egl_app_target();
+    if (rt.have_binding && rt.binding_thread == (unsigned long)pthread_self()) {
+        const int n = g_sdl_repair_attempts.fetch_add(1, std::memory_order_relaxed) + 1;
+        RepairSdlCurrentWindow();
+        if (n >= 8) g_sdl_repair_done = true;
     }
 }
 
 void mg_egl_note_guarded_call() {
     static thread_local unsigned long t_calls = 0;
+    static thread_local unsigned long t_sdl_countdown = kSdlRepairInterval;
     ++t_calls;
     VerifyContextStillCurrent(t_calls);
-    SdlSwapGateTick(t_calls);
+    SdlSwapGateTick(t_sdl_countdown);
 }
 
 // The guard-off counterpart of mg_egl_note_guarded_call(). Called from
 // ScopedHostContext's guard-off branch, i.e. from every entry point in the
-// default configuration. Steady-state cost: one thread-local increment and one
-// modulo — no EGL call, no lock. RepairHostContextOnce() did not cover this
-// because it only runs after an observed failure, and a refused swap produces
-// no failure this library can see: SDL checks its own TLS and sets its own
-// error before eglSwapBuffers is ever reached.
+// default configuration. Steady-state cost: one thread-local decrement and one
+// branch on the flag it produces — no EGL call, no lock, no division.
+// RepairHostContextOnce() did not cover this because it only runs after an
+// observed failure, and a refused swap produces no failure this library can
+// see: SDL checks its own TLS and sets its own error before eglSwapBuffers is
+// ever reached.
+//
+// The call counter the verify path needs is deliberately NOT kept here. This
+// path does not verify — it never calls eglGetCurrentContext() — so a counter
+// it would only increment and never read is a write the thread-local slot does
+// not need to make.
 void mg_egl_note_unguarded_call() {
-    static thread_local unsigned long t_calls = 0;
-    ++t_calls;
-    SdlSwapGateTick(t_calls);
+    static thread_local unsigned long t_sdl_countdown = kSdlRepairInterval;
+    SdlSwapGateTick(t_sdl_countdown);
 }
 
 // Pairs a successful BindFallbackEGLContextIfNeeded().
