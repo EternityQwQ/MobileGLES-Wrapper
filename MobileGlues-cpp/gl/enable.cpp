@@ -597,7 +597,22 @@ extern "C"
             *data = ival != 0 ? GL_TRUE : GL_FALSE;
             return;
         }
+        // This is the one state query that had no repair path. glGetIntegerv,
+        // glGetFloatv and glGetInteger64v each hand their driver answer to a
+        // guard that re-asks under a bound context when it comes back unusable;
+        // glGetBooleanv went straight to the driver and took whatever it left.
+        //
+        // The sentinel is what makes a repair possible here at all. A boolean
+        // has no unusable value — GL_FALSE is a legitimate answer to "is
+        // GL_DEPTH_TEST on" — and the driver's failure mode when the calling
+        // thread has no context is to write nothing, which leaves the caller's
+        // buffer untouched and is indistinguishable from a successful GL_FALSE.
+        // Pre-seeding with 0xFF (not a value the specification admits) turns
+        // "the driver never wrote" into something that can be observed.
+        const GLboolean sentinel = (GLboolean)0xFF;
+        *data = sentinel;
         GLES.glGetBooleanv(pname, data);
+        mg_guard_host_limit_b(pname, data, sentinel);
     }
 
     GLAPI GLAPIENTRY void glGetFloatv(GLenum pname, GLfloat* data) {

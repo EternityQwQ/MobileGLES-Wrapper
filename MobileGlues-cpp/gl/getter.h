@@ -39,6 +39,14 @@ extern "C"
     void mg_guard_host_limit_f(GLenum pname, GLfloat* params);
     void mg_guard_host_limit_i64(GLenum pname, GLint64* params);
 
+    // The boolean form, for glGetBooleanv. Returns true when it repaired the
+    // value. Unlike the three above it cannot read its own output to tell an
+    // unanswered query from a real answer, so the caller writes `sentinel` into
+    // *params before calling the driver and this looks for it still being there.
+    // 0xFF is the only value that can serve as a sentinel: GLboolean admits
+    // exactly GL_FALSE and GL_TRUE, so nothing a driver may write collides.
+    bool mg_guard_host_limit_b(GLenum pname, GLboolean* params, GLboolean sentinel);
+
 #ifdef __cplusplus
 }
 #endif

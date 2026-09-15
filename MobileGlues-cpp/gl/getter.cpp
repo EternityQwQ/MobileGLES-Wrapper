@@ -329,7 +329,40 @@ void mg_guard_host_limit_i64(GLenum pname, GLint64* params) {
 
     const GLint value = ResolveLimitFallback(*entry);
     *params = (GLint64)value;
+
     ReportSubstitution(pname, *entry, value, rejected);
+}
+
+// The boolean form. It exists because glGetBooleanv is the one state query that
+// had no repair path at all — glGetIntegerv, glGetFloatv and glGetInteger64v
+// each call a guard here, and glGetBooleanv did not.
+//
+// It cannot work the way the other three do. They read their own output and
+// repair when it comes back unusable (<= 0), which is sound because a limit is
+// always positive. A boolean has no unusable value: GL_FALSE is a legitimate
+// answer to "is GL_DEPTH_TEST on", so there is nothing in the output to test.
+// The driver's failure mode is worse than a wrong value, too — with no current
+// context it does not write at all, leaving the caller's buffer holding whatever
+// it held before, which is indistinguishable from a successful GL_FALSE.
+//
+// So the caller marks the output before the driver runs and this function looks
+// for the mark still being there. `sentinel` is what the caller wrote; anything
+// else means the driver answered and the answer stands.
+//
+// GLboolean is an unsigned char and the specification admits exactly two values,
+// GL_FALSE (0) and GL_TRUE (1), so 0xFF cannot be a real answer and cannot be
+// confused with one. Only enums this layer already tracks as limits are repaired
+// — the table check mirrors the float path above, and keeps a boolean query like
+// GL_DEPTH_WRITEMASK from pulling a device limit it never asked about.
+bool mg_guard_host_limit_b(GLenum pname, GLboolean* params, GLboolean sentinel) {
+    if (!params || *params != sentinel) return false;
+    if (!limitguard::FindLimitFallback(pname)) return false;
+
+    const GLint value = limitguard::QueryHostInt(pname);
+    if (value <= 0) return false;
+
+    *params = (value != 0) ? GL_TRUE : GL_FALSE;
+    return true;
 }
 
 // =============================================================================
