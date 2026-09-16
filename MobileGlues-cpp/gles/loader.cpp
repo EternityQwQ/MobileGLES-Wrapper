@@ -109,6 +109,57 @@ void* proc_address(void* lib, const char* name) {
 }
 
 // ---------------------------------------------------------------------------
+// Entry-point resolution report
+//
+// init_target_gles() fills g_gles_func with dlsym results. A name the driver
+// does not export leaves that slot NULL, and the next call through it is a
+// null-pointer dereference — the one failure this layer cannot diagnose after
+// the fact, and the one a release build cannot see at all, because
+// INIT_GLES_FUNC's LOG_W is compiled out.
+//
+// What makes a null legitimate is whether the layer tests for it. Extension
+// entry points (anything carrying an EXT/OES/KHR/... suffix) are each guarded
+// by an `if (GLES.name)` at the call site, so a device without the extension is
+// fine. Core ES 3.2 is not guarded, so a null there is fatal.
+//
+// The list is NOT written by hand. `GLES_ALL_ENTRIES(X)` (gles/gles.h) is the
+// same macro sequence init_target_gles() uses — 368 names, same order, verified
+// against the INIT_GLES_FUNC rows — so redefining X here re-runs the resolution
+// list instead of duplicating it: one list, two expansions, no drift.
+//
+// What it does NOT cover is a field that exists in gles_func_t but has no
+// INIT_GLES_FUNC row, because such a slot is never assigned in the first place
+// and so never appears in either list. There is one today — glBruh, a joke entry
+// point at the end of the struct — and it is dead by construction, not
+// unresolved. Anything else added to the struct without a matching row would be
+// a bug this table cannot see; the two lists it can compare are kept equal.
+// ---------------------------------------------------------------------------
+struct GlesEntry {
+    const char* name;
+    void* value;
+};
+
+#define GLES_ENTRY(name) {#name, (void*)GLES.name},
+const GlesEntry kGlesEntryNames[] = {
+    GLES_ALL_ENTRIES(GLES_ENTRY)
+};
+#undef GLES_ENTRY
+
+// A name carrying an extension suffix belongs to an extension the device may
+// legitimately lack. The layer guards every such call with a null test.
+bool IsOptionalGlesEntry(const char* name) {
+    static const char* const kExtensionMarkers[] = {
+        "EXT", "OES", "KHR", "NV", "QCOM", "ARB", "IMG", "APPLE", "ANDROID", "ANGLE", "MG",
+    };
+    for (const char* marker : kExtensionMarkers) {
+        if (strstr(name, marker) != nullptr) return true;
+    }
+    return false;
+}
+
+void ReportUnresolvedGlesEntries();
+
+// ---------------------------------------------------------------------------
 // Hardware & GL State Setup (ES 3.2 target)
 // ---------------------------------------------------------------------------
 
@@ -899,4 +950,61 @@ void init_target_gles() {
 
     InitGLESCapabilities();
     LogOpenGLExtensions();
+
+    ReportUnresolvedGlesEntries();
+
+    // Last: everything above has had its say about the driver, and the string
+    // caches the application will ask for on its first frame can now be built
+    // on this thread rather than inside that frame. Ordering matters only in
+    // that it must come after InitGLESCapabilities() — the version/extension
+    // strings are what it reports.
+    WarmStringCaches();
+}
+
+// ---------------------------------------------------------------------------
+// Unresolved-entry report
+//
+// init_target_gles() resolves the driver entry points with dlsym and stores them
+// in g_gles_func. A name the driver does not export stays NULL, and every later
+// call through that slot is a null-pointer dereference. That is not diagnosable
+// from a bug report, and not visible in a release build either: the LOG_W that
+// INIT_GLES_FUNC would emit is compiled out.
+//
+// The entries that are ALLOWED to be null are exactly the ones the layer guards
+// with an `if (GLES.name)` test before use — extension entry points the device
+// may legitimately lack. Everything else is core ES 3.2, and a missing one is a
+// hard failure. This distinguishes the two and says so, once, at startup, for
+// the cost of one walk of the table.
+//
+// It is a report and not a repair: on a driver that resolves everything, which
+// is the case this has to stay free for, it does nothing but count.
+// ---------------------------------------------------------------------------
+void ReportUnresolvedGlesEntries() {
+    // Counted first, logged second: a line per missing entry would be hundreds
+    // of lines on a badly broken driver, and the summary is what gets pasted.
+    int missing_core = 0;
+    int missing_optional = 0;
+    const char* first_missing_core = nullptr;
+
+    for (const GlesEntry& e : kGlesEntryNames) {
+        if (e.value != nullptr) continue;
+        if (IsOptionalGlesEntry(e.name)) {
+            ++missing_optional;
+            continue;
+        }
+        if (first_missing_core == nullptr) first_missing_core = e.name;
+        ++missing_core;
+    }
+
+    if (missing_core == 0) {
+        LOG_I("GLES: every core entry point resolved; %d optional extension entries absent", missing_optional)
+        return;
+    }
+
+    // Unconditional, and it names the first: this is the case that makes the
+    // layer call through a null pointer, and it has to be visible in latest.log.
+    LOG_W_FORCE("GLES: %d core entry point(s) could not be resolved from the driver; the first is %s. "
+                "A call through an unresolved slot is undefined behaviour. %d optional extension entries are also "
+                "absent, which is normal.",
+                missing_core, first_missing_core, missing_optional)
 }

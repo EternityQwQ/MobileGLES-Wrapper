@@ -296,6 +296,49 @@ bool EnsureHostContextOnce();
 // "we tried and could not install one" without asking the driver again.
 bool EnsureHostContextSettled(unsigned generation);
 
+// The settled memory itself, exposed so the per-call fast path can be tested
+// inline rather than through a call.
+//
+// EnsureHostContextOnce() is correct but it is a call, and it opens with a call
+// to mg_egl_app_target_generation(). Both sit on every GL entry point — there are
+// about 127 of them — and both are on the path taken when the answer is already
+// known, which is all of them but the first per thread per generation. The
+// loads below are the entire remaining cost: two thread-locals and one atomic.
+//
+// Defined in loader.cpp. Only loader.cpp writes them; a reader that sees
+// t_ctx_settled set and t_ctx_settled_generation equal to the current
+// generation knows the question was answered without asking the driver again —
+// the same thing EnsureHostContextSettled() would have told it.
+extern thread_local bool t_ctx_settled;
+extern thread_local unsigned t_ctx_settled_generation;
+
+// Declared early, and declared again with the rest of the render-target API
+// further down this header: the inline paths in this section need it, and they
+// are defined before that block. It is a plain atomic load (egl/egl.cpp), so
+// calling it from an inline is free of locks and side effects.
+unsigned mg_egl_app_target_generation();
+
+// The guard-off counterpart of the tick above, inlined for the same reason.
+//
+// This is what the guard-off branch of ScopedHostContext runs on every call:
+// one thread-local decrement and one branch on the result, with the expensive
+// work (atomic fetch_add, dlopen, dlsym) behind the branch and reached once in
+// kMgSdlRepairInterval calls. It was a call into loader.cpp; inlining it removes
+// the call and the frame on a path that does nothing 4999 times out of 5000.
+//
+// kMgSdlRepairInterval must stay equal to kSdlRepairInterval in loader.cpp.
+constexpr unsigned long kMgSdlRepairInterval = 5000;
+extern thread_local unsigned long t_sdl_repair_countdown;
+void mg_egl_sdl_swap_gate_tick_slow();
+
+inline void mg_egl_note_unguarded_call() {
+    // Cheapest test first: decrement, then branch on the flag. Everything
+    // expensive lives behind the call, which is taken once per interval.
+    if (--t_sdl_repair_countdown != 0) return;
+    t_sdl_repair_countdown = kMgSdlRepairInterval;
+    mg_egl_sdl_swap_gate_tick_slow();
+}
+
 class ScopedHostContext {
 public:
     ScopedHostContext() : bound_(false) {
@@ -326,7 +369,18 @@ public:
         // afterwards, which is the same memory RepairHostContextOnce() uses —
         // deliberately the same, so the two cannot disagree about whether a
         // thread is usable.
-        bound_ = EnsureHostContextOnce();
+        //
+        // Tested inline rather than through a call to EnsureHostContextOnce().
+        // The call was correct, but it sits on this constructor, which sits on
+        // every entry point, and the answer it produces is "already answered"
+        // on every call after the first per thread per generation — i.e. on
+        // essentially all of them. The test below is exactly
+        // EnsureHostContextSettled(mg_egl_app_target_generation()) inlined:
+        // two thread-local loads and one atomic. The called form remains the
+        // slow path, and both read the same variables, so they cannot disagree.
+        if (!t_ctx_settled || t_ctx_settled_generation != mg_egl_app_target_generation()) {
+            bound_ = EnsureHostContextOnce();
+        }
 
         // The watchdog's call-rate counter is deliberately NOT fed here: it
         // describes the per-call check this mode does not make, and counting

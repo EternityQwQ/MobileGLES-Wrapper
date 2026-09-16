@@ -33,6 +33,12 @@ extern "C"
     void InitGLESBaseExtensions();
     void set_es_version();
 
+    // Builds the synthetic-string caches and glGetStringi's token tables ahead
+    // of the first query, so the work does not land on the first frame. Called
+    // once from init_target_gles(). Changing the moment does not change any
+    // answer; see the definition in getter.cpp.
+    void WarmStringCaches();
+
     // Repair a device-limit query the host GLES driver did not answer.
     // See "Host Limit Query Fallbacks" in getter.cpp for why this exists.
     void mg_guard_host_limit_i(GLenum pname, GLint* params);

@@ -954,6 +954,45 @@ const GLubyte* glGetString(GLenum name) {
 //   then returns the requested part by index.
 // =============================================================================
 
+// -----------------------------------------------------------------------------
+// WarmStringCaches() — build the string caches while nothing is waiting on them
+//
+// Every synthetic string glGetString serves (GL_VENDOR, GL_VERSION, GL_RENDERER,
+// GL_SHADING_LANGUAGE_VERSION) is built once and kept in a static std::string,
+// and glGetStringi's tokenizer is built once behind its own `initialized` flag.
+// Both were therefore built on FIRST ASK, which is always the wrong moment: the
+// renderer queries GL_RENDERER inside its own startup, and the build behind that
+// answer is several std::string concatenations, a getGpuName() host round-trip
+// and a getGLESName() host round-trip — three host glGetString calls, each of
+// which opens with a ScopedHostContext, plus the malloc/strdup of the tokenizer
+// on the first glGetStringi. Lumping that onto the first frame is a startup
+// spike for no reason: none of it depends on anything the application does.
+//
+// So it is done here, once, at the end of init_target_gles(), on the thread that
+// has just finished resolving the driver's entry points. Nothing is skipped or
+// made lazy — the same values are computed by the same code, and every later
+// query reads the cache it would have read anyway. Only the moment moves.
+//
+// GL_EXTENSIONS is deliberately NOT warmed: InitGLESBaseExtensions() already
+// ran during the capability pass and the string is in es_ext.
+// -----------------------------------------------------------------------------
+void WarmStringCaches() {
+    // The four names glGetString serves from a cache, plus GL_EXTENSIONS so the
+    // tokenizer's entry for it is filled too.
+    static const GLenum kCachedStringNames[] = {
+        GL_VENDOR, GL_VERSION, GL_RENDERER, GL_SHADING_LANGUAGE_VERSION, GL_EXTENSIONS,
+    };
+    for (GLenum name : kCachedStringNames) {
+        (void)glGetString(name);
+    }
+
+    // glGetStringi builds all four token lists in one pass on first call; asking
+    // for index 0 of any of them triggers it. The parts arrays are built behind
+    // `initialized` and are never rebuilt, so this costs the same work the first
+    // real query would have done — just not during the first frame.
+    (void)glGetStringi(GL_EXTENSIONS, 0);
+}
+
 const GLubyte* glGetStringi(GLenum name, GLuint index) {
     ScopedHostContext __hostCtx;
     LOG()
