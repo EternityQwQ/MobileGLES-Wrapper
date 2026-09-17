@@ -883,31 +883,36 @@ static void SdlSwapGateTick(unsigned long& countdown) {
     }
 }
 
-void mg_egl_note_guarded_call() {
-    static thread_local unsigned long t_calls = 0;
-    static thread_local unsigned long t_sdl_countdown = kSdlRepairInterval;
-    ++t_calls;
-    VerifyContextStillCurrent(t_calls);
-    SdlSwapGateTick(t_sdl_countdown);
+// The countdown the inlined tick in loader.h decrements. Moved out of
+// mg_egl_note_unguarded_call()'s body, and that function is now an inline in the
+// header, so that the per-call path costs a decrement and a branch with no call
+// and no frame. Only the rare expiry reaches the slow half below.
+thread_local unsigned long t_sdl_repair_countdown = kSdlRepairInterval;
+
+// The rare half of the SDL swap-gate tick: everything the inline in loader.h
+// deliberately does not do. Runs once per kSdlRepairInterval calls on a thread.
+void mg_egl_sdl_swap_gate_tick_slow() {
+    if (g_sdl_repair_done) return;
+
+    const AppRenderTarget& rt = mg_egl_app_target();
+    if (rt.have_binding && rt.binding_thread == (unsigned long)pthread_self()) {
+        const int n = g_sdl_repair_attempts.fetch_add(1, std::memory_order_relaxed) + 1;
+        RepairSdlCurrentWindow();
+        if (n >= 8) g_sdl_repair_done = true;
+    }
 }
 
-// The guard-off counterpart of mg_egl_note_guarded_call(). Called from
-// ScopedHostContext's guard-off branch, i.e. from every entry point in the
-// default configuration. Steady-state cost: one thread-local decrement and one
-// branch on the flag it produces — no EGL call, no lock, no division.
-// RepairHostContextOnce() did not cover this because it only runs after an
-// observed failure, and a refused swap produces no failure this library can
-// see: SDL checks its own TLS and sets its own error before eglSwapBuffers is
-// ever reached.
-//
-// The call counter the verify path needs is deliberately NOT kept here. This
-// path does not verify — it never calls eglGetCurrentContext() — so a counter
-// it would only increment and never read is a write the thread-local slot does
-// not need to make.
-void mg_egl_note_unguarded_call() {
-    static thread_local unsigned long t_sdl_countdown = kSdlRepairInterval;
-    SdlSwapGateTick(t_sdl_countdown);
+void mg_egl_note_guarded_call() {
+    static thread_local unsigned long t_calls = 0;
+    ++t_calls;
+    VerifyContextStillCurrent(t_calls);
+    SdlSwapGateTick(t_sdl_repair_countdown);
 }
+
+// mg_egl_note_unguarded_call() is now an inline in loader.h — see the comment
+// there. Its body was one thread-local decrement and a branch, on every call
+// made while the guard is off (i.e. on the default configuration's every call),
+// and the call itself was the larger half of that cost.
 
 // Pairs a successful BindFallbackEGLContextIfNeeded().
 //
@@ -989,8 +994,20 @@ void UnbindFallbackEGLContext() {}
 // The state both entry points read. File scope rather than function-local so
 // EnsureHostContextSettled() can observe it without duplicating the memory —
 // two copies of this flag is exactly the disagreement this design avoids.
-static thread_local bool t_ctx_settled = false;
-static thread_local unsigned t_ctx_settled_generation = 0;
+//
+// These are no longer file-scope `static`. They are extern (declared in
+// loader.h) so ScopedHostContext's constructor can test them inline, without
+// the call below. That constructor runs on every one of the ~127 GL entry
+// points, and the settled case -- every call after the first on a thread, for
+// a generation -- is the only case it usually sees. Making the test inline
+// removes two function calls (EnsureHostContextOnce and
+// mg_egl_app_target_generation) from that path; what is left is one thread-local
+// flag load, one thread-local generation load and one atomic load.
+//
+// The definition is unchanged: thread_local, internal linkage dropped only so
+// the header can name them. Nothing outside this translation unit writes them.
+thread_local bool t_ctx_settled = false;
+thread_local unsigned t_ctx_settled_generation = 0;
 
 bool EnsureHostContextSettled(unsigned generation) {
     return t_ctx_settled && t_ctx_settled_generation == generation;
